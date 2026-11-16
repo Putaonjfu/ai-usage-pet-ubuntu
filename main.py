@@ -187,6 +187,7 @@ class UsagePet(QWidget):
         self.browser_bridge = None
         self.browser_dialog = None
         self.web_balance = {}
+        self.web_state = 'waiting'
         self.browserBalanceReceived.connect(self.apply_web_balance)
         self.notified = set()
         self.worker = None
@@ -472,6 +473,8 @@ class UsagePet(QWidget):
     def update_timing(self):
         if self.web_balance and not self.current_web_balance():
             self.web_balance = {}
+            if self.web_state in ('connected', 'refreshing'):
+                self.web_state = 'expired'
             self.render_codex(self.current.get("codex", {}))
             self.render_selected()
             return
@@ -485,7 +488,10 @@ class UsagePet(QWidget):
             self.mini_note.setCursor(Qt.CursorShape.PointingHandCursor)
             if provider == "openai" or codex["data"]["api"].get("billing_url"):
                 balance = self.current_web_balance()
-                note = "网页更新 " + datetime.fromtimestamp(balance["checked_at"]).strftime("%H:%M") + " ↗" if balance else "连接 Chrome 余额 ↗"
+                if balance and self.web_state == 'connected':
+                    note = "网页更新 " + datetime.fromtimestamp(balance["checked_at"]).strftime("%H:%M") + " ↗"
+                else:
+                    note = self.web_state_text() + " ↗"
                 self.mini_note.setText('<a href="billing" style="color:#8b8594; text-decoration:none;">' + note + '</a>')
             else:
                 self.mini_note.setText("余额接口未适配")
@@ -502,7 +508,8 @@ class UsagePet(QWidget):
             self.mini_note.setText(self.sync.text())
         else:
             self.mini_note.setText("读取失败 · 查看详情" if self.current else "正在连接…")
-        tooltip = details + "\n" + self.sync.text() + "\n" + self.polling_text()
+        web_mode = provider == 'openai' or (provider == 'codex' and is_api)
+        tooltip = details + "\n" + (self.web_state_text() if web_mode else self.sync.text()) + "\n" + self.polling_text()
         self.root.setToolTip(tooltip)
         self.hero_value.setToolTip(tooltip)
         self.mini_note.setToolTip(tooltip)
@@ -514,11 +521,25 @@ class UsagePet(QWidget):
         return self.web_balance if 0 <= age <= lifetime else {}
 
     def apply_web_balance(self, data):
-        self.web_balance = data
+        if 'state' in data:
+            self.web_state = data['state']
+            if self.web_state != 'refreshing':
+                self.web_balance = {}
+        else:
+            self.web_balance = data
+            self.web_state = 'connected' if data else 'read_failed'
         if self.browser_dialog is not None:
-            self.browser_dialog.status.setText("已收到网页余额：" + money(data["balance"], "USD") if data else "等待网页读取余额…")
+            self.browser_dialog.status.setText("已收到网页余额：" + money(data["balance"], "USD")
+                if data.get('balance') is not None else self.web_state_text())
         self.render_codex(self.current.get("codex", {}))
         self.render_selected()
+
+    def web_state_text(self):
+        return {'waiting': '等待扩展连接', 'connected': '网页余额已更新',
+                'refreshing': '正在更新余额', 'expired': '余额更新中断',
+                'login_required': '网页需要登录', 'page_missing': '正在恢复余额页',
+                'read_failed': '网页读取失败', 'network_error': '网页连接超时',
+                'multiple_pages': '请选择余额页', 'disconnected': '已取消配对'}.get(self.web_state, '等待网页更新')
 
     def start_browser_bridge(self):
         if self.browser_bridge is None:
@@ -543,6 +564,7 @@ class UsagePet(QWidget):
         if self.browser_dialog is None:
             from browser_balance import create_browser_dialog
             self.browser_dialog = create_browser_dialog(self, self.browser_bridge)
+        self.browser_dialog.status.setText(self.web_state_text())
         self.browser_dialog.show()
         self.browser_dialog.raise_()
         self.browser_dialog.activateWindow()
@@ -555,7 +577,7 @@ class UsagePet(QWidget):
             self.api_box.addWidget(QLabel(money(balance["balance"], "USD")))
             self.api_box.addWidget(caption("网页读取于 " + datetime.fromtimestamp(balance["checked_at"]).strftime("%m-%d %H:%M")))
         else:
-            self.api_box.addWidget(caption("在 Chrome 登录官方余额页，选好对应组织，再连接扩展。"))
+            self.api_box.addWidget(caption(self.web_state_text() + '。在 Chrome 打开官方余额页，扩展中点“使用当前页”可切回正确标签。'))
         self.api_box.addWidget(caption("显示浏览器当前组织余额，不代表单个 Key 的独立预算。页面变化时同步，每分钟刷新查询。"))
         button = QPushButton("连接 Chrome 余额 ↗")
         button.clicked.connect(self.open_api_billing)

@@ -109,7 +109,7 @@ class UI(unittest.TestCase):
         self.assertEqual(self.pet.quota_windows, [])
         self.assertIsNone(self.pet.scene.remaining)
         self.assertEqual(self.pet.summary_reset.text(), '—')
-        self.assertIn('连接 Chrome 余额', self.pet.mini_note.text())
+        self.assertIn('等待扩展连接', self.pet.mini_note.text())
         self.assertEqual((self.pet.width(), self.pet.height()), (240, 88))
         with patch('web_balance.create_billing_window') as create_window:
             self.pet.open_embedded_billing()
@@ -172,6 +172,25 @@ class UI(unittest.TestCase):
         finally:
             restored.close()
             self.app.aboutToQuit.disconnect(restored.close)
+
+    def test_refresh_preserves_fresh_value_but_expiry_and_login_failure_explain_blank(self):
+        import time
+        self.pet.updated(DATA)
+        self.pet.provider_selector.setCurrentIndex(self.pet.provider_selector.findData('openai'))
+        checked = int(time.time())
+        self.pet.apply_web_balance({'balance': '12.34', 'checked_at': checked, 'source': 'chrome_web'})
+        self.pet.apply_web_balance({'state': 'refreshing'})
+        self.assertEqual(self.pet.hero_value.text(), '$12.34')
+        self.assertEqual(self.pet.web_balance['checked_at'], checked)
+        self.assertIn('正在更新余额', self.pet.mini_note.text())
+        self.pet.web_balance['checked_at'] = checked - 151
+        self.pet.update_timing()
+        self.assertEqual(self.pet.hero_value.text(), '—')
+        self.assertIn('余额更新中断', self.pet.mini_note.text())
+        self.pet.apply_web_balance({'balance': '12.34', 'checked_at': checked, 'source': 'chrome_web'})
+        self.pet.apply_web_balance({'state': 'login_required'})
+        self.assertEqual(self.pet.hero_value.text(), '—')
+        self.assertIn('网页需要登录', self.pet.mini_note.text())
 
     def test_web_balance_is_organization_money_and_stale_data_is_hidden(self):
         from providers import api_mode_info

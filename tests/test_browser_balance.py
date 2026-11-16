@@ -80,6 +80,15 @@ class BrowserBridge(unittest.TestCase):
         self.assertEqual(self.post({'balance': '12.34', 'sampled_at': True})[0], 400)
         self.assertEqual(len(self.received), 1)
 
+    def test_authenticated_lifecycle_states_carry_no_money_or_new_sample_time(self):
+        self.assertEqual(self.post({'state': 'refreshing'})[0], 200)
+        self.assertEqual(self.received[-1]['state'], 'refreshing')
+        self.assertNotIn('balance', self.received[-1])
+        self.assertNotIn('checked_at', self.received[-1])
+        self.assertEqual(self.post({'state': 'login_required'})[0], 200)
+        self.assertEqual(self.post({'state': 'arbitrary page text'})[0], 400)
+        self.assertEqual(self.post({'state': 'refreshing', 'cookies': 'no'})[0], 400)
+
 
 if __name__ == '__main__':
     unittest.main()

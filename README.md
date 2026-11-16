@@ -32,6 +32,8 @@ OpenAI 网页余额：在浮条“⋯ → 连接 Chrome 余额”中复制扩展
 
 配对仅保存在本机；浮条配置 `~/.config/ai-usage-pet/browser-pairing.json` 权限为 600，扩展使用本地存储。可在扩展中“取消配对”停止更新。不读取或导出 Cookie、密码、API Key；无有效数据时停止显示旧余额。
 
+关闭浏览器窗口后继续更新：在 `chrome://settings/system` 启用“关闭 Google Chrome 后继续运行后台应用”。扩展使用 `background` 权限；没有浏览器窗口时会维护一个最小化的余额窗口，不抢焦点。从菜单“退出”Chrome、禁用扩展或系统休眠时无法查询；官网记录可能延迟。网页登录过期仍需重新登录。
+
 Codex 优先沿用代理环境变量；未设置时读取 GNOME 已配置的手动 HTTP/HTTPS 代理。Wayland 下置顶行为由桌面合成器决定。
 
 ## 排错与测试

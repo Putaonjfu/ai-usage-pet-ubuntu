@@ -14,6 +14,7 @@ import time
 
 DECIMAL = re.compile(r'-?\d{1,12}(?:\.\d{1,8})?\Z')
 EXTENSION_ORIGIN = re.compile(r'chrome-extension://[a-p]{32}\Z')
+STATES = {'refreshing', 'login_required', 'page_missing', 'read_failed', 'network_error', 'multiple_pages', 'disconnected'}
 
 
 def read_pairing(path):
@@ -105,6 +106,12 @@ class BalanceBridge:
                     if not 0 < length <= 256 or self.headers.get_content_type() != 'application/json':
                         raise ValueError()
                     data = json.loads(self.rfile.read(length))
+                    if isinstance(data, dict) and set(data) == {'state'}:
+                        if not isinstance(data['state'], str) or data['state'] not in STATES:
+                            raise ValueError()
+                        on_balance({'state': data['state'], 'received_at': int(time.time())})
+                        self.reply(200)
+                        return
                     if (not isinstance(data, dict) or 'balance' not in data
                             or set(data) - {'balance', 'sampled_at'}):
                         raise ValueError()
@@ -183,7 +190,7 @@ def create_browser_dialog(parent, bridge):
     website = QPushButton('在默认浏览器打开 OpenAI 余额页')
     website.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(BILLING_URL)))
     layout.addWidget(website)
-    note = QLabel('配对保存在本机，浏览器和浮条重启后自动恢复。页面金额变化时立即同步，每分钟刷新查询；官网更新可能有延迟。')
+    note = QLabel('配对保存在本机。每分钟刷新官网；启用 Chrome“关闭后继续运行后台应用”后可自动维护最小化余额窗口。完全退出 Chrome 会停止更新。')
     note.setWordWrap(True)
     layout.addWidget(note)
     dialog.status = QLabel('等待 Chrome 扩展连接…')

@@ -16,3 +16,6 @@ settings.json
 
 web-profile/
 QtWebEngine/
+browser-pairing.json
+chrome-extension.zip
+chrome-extension-v*.zip

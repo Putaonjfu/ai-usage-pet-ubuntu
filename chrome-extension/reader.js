@@ -17,6 +17,7 @@
     }
     return values.size === 1 ? [...values][0] : null;
   }
+  globalThis.__usagePetReadBalance = () => validPage() ? parse(document.body?.innerText || '') : null;
   // SPA content can arrive after the document's load event.
   for (let attempt = 0; attempt < 20; attempt++) {
     if (!validPage()) return {balance: null};

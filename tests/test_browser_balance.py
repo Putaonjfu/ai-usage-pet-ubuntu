@@ -1,7 +1,10 @@
 """Exercise the real loopback boundary without accessing any account or website."""
 import http.client
 import json
+import os
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -51,6 +54,31 @@ class BrowserBridge(unittest.TestCase):
                      {'balance': '12.34', 'cookies': 'must not be accepted'}, [], None]:
             self.assertEqual(self.post(body)[0], 400)
         self.assertEqual(self.received, [])
+
+    def test_persistent_pairing_survives_receiver_restart_with_private_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'app' / 'browser-pairing.json'
+            receiver = BalanceBridge(self.received.append, state_path=path)
+            code = receiver.pairing_code
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            receiver.close()
+            restored = BalanceBridge(self.received.append, state_path=path)
+            try:
+                self.assertEqual(restored.pairing_code, code)
+            finally:
+                restored.close()
+            os.chmod(path, 0o644)
+            with self.assertRaises(OSError):
+                BalanceBridge(self.received.append, state_path=path)
+
+    def test_page_timestamp_is_preserved_and_stale_sample_is_rejected(self):
+        sampled = int(time.time()) - 90
+        self.assertEqual(self.post({'balance': '12.34', 'sampled_at': sampled})[0], 200)
+        self.assertEqual(self.received[-1]['checked_at'], sampled)
+        self.assertEqual(self.post({'balance': '12.34', 'sampled_at': sampled - 1000})[0], 400)
+        self.assertEqual(self.post({'balance': '12.34', 'sampled_at': True})[0], 400)
+        self.assertEqual(len(self.received), 1)
 
 
 if __name__ == '__main__':

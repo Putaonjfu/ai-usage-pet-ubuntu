@@ -3,6 +3,7 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import sys
 import unittest
+import tempfile
 from pathlib import Path
 from unittest.mock import patch, Mock
 from copy import deepcopy
@@ -29,6 +30,8 @@ class UI(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        self.config_dir = tempfile.TemporaryDirectory()
+        patch('preferences.CONFIG', Path(self.config_dir.name) / 'settings.json').start()
         patch('preferences.save').start()
         self.no_refresh = patch.object(UsagePet, 'refresh').start()
         patch.object(UsagePet, 'create_tray', lambda w: setattr(w, 'tray', None)).start()
@@ -42,6 +45,7 @@ class UI(unittest.TestCase):
         self.pet.deleteLater()
         self.app.processEvents()
         patch.stopall()
+        self.config_dir.cleanup()
 
     def test_live_data_and_unavailable_clear_previous_values(self):
         self.pet.updated(DATA)
@@ -152,6 +156,22 @@ class UI(unittest.TestCase):
         finally:
             bridge.close()
             self.app.aboutToQuit.disconnect(bridge.close)
+
+    def test_saved_pairing_restores_receiver_without_opening_dialog(self):
+        import preferences
+        from browser_balance import BalanceBridge
+        original = BalanceBridge(lambda _: None, state_path=preferences.CONFIG.parent / 'browser-pairing.json')
+        code = original.pairing_code
+        original.close()
+        self.pet.restore_browser_bridge()
+        restored = self.pet.browser_bridge
+        try:
+            self.assertIsNotNone(restored)
+            self.assertEqual(restored.pairing_code, code)
+            self.assertIsNone(self.pet.browser_dialog)
+        finally:
+            restored.close()
+            self.app.aboutToQuit.disconnect(restored.close)
 
     def test_web_balance_is_organization_money_and_stale_data_is_hidden(self):
         from providers import api_mode_info

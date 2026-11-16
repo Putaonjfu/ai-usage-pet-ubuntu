@@ -346,6 +346,7 @@ class UsagePet(QWidget):
         self.render_selected()
         self.create_tray()
         QTimer.singleShot(150, self.refresh)
+        QTimer.singleShot(0, self.restore_browser_bridge)
         # On GNOME Wayland placement is compositor-controlled. This is best-effort.
         screen = QApplication.primaryScreen()
         if screen:
@@ -459,9 +460,7 @@ class UsagePet(QWidget):
             balance = self.current_web_balance()
             if not balance:
                 return "网页余额：等待 Chrome 扩展读取"
-            minutes = self.browser_bridge.refresh_minutes if self.browser_bridge else self.prefs.get("refresh_minutes", 5)
-            next_time = datetime.fromtimestamp(balance["checked_at"] + minutes * 60)
-            return "网页预计下次读取：" + next_time.strftime("%H:%M")
+            return "页面变化时同步 · 每分钟刷新查询（官网可能延迟）"
         if not self.quick_refresh.isEnabled():
             return "账户数据：正在查询…"
         remaining = self.timer.remainingTime()
@@ -511,7 +510,8 @@ class UsagePet(QWidget):
     def current_web_balance(self):
         checked_at = self.web_balance.get("checked_at", 0)
         age = datetime.now().timestamp() - checked_at
-        return self.web_balance if 0 <= age <= self.prefs.get("refresh_minutes", 5) * 60 + 90 else {}
+        lifetime = 150 if self.web_balance.get('source') == 'chrome_web' else self.prefs.get("refresh_minutes", 5) * 60 + 90
+        return self.web_balance if 0 <= age <= lifetime else {}
 
     def apply_web_balance(self, data):
         self.web_balance = data
@@ -520,16 +520,28 @@ class UsagePet(QWidget):
         self.render_codex(self.current.get("codex", {}))
         self.render_selected()
 
-    def open_api_billing(self):
-        if self.browser_dialog is None:
-            from browser_balance import BalanceBridge, create_browser_dialog
-            try:
-                self.browser_bridge = BalanceBridge(self.browserBalanceReceived.emit,
-                                                    self.prefs.get("refresh_minutes", 5))
-            except OSError:
-                QMessageBox.warning(self, "连接不可用", "无法启动本机余额接收器。请检查本机网络权限。")
-                return
+    def start_browser_bridge(self):
+        if self.browser_bridge is None:
+            from browser_balance import BalanceBridge
+            self.browser_bridge = BalanceBridge(self.browserBalanceReceived.emit, 1,
+                state_path=preferences.CONFIG.parent / 'browser-pairing.json')
             self.app.aboutToQuit.connect(self.browser_bridge.close)
+
+    def restore_browser_bridge(self):
+        if (preferences.CONFIG.parent / 'browser-pairing.json').exists():
+            try:
+                self.start_browser_bridge()
+            except OSError:
+                pass  # The connection dialog reports the failure when opened.
+
+    def open_api_billing(self):
+        try:
+            self.start_browser_bridge()
+        except OSError as error:
+            QMessageBox.warning(self, "连接不可用", "无法恢复本机余额连接：" + str(error))
+            return
+        if self.browser_dialog is None:
+            from browser_balance import create_browser_dialog
             self.browser_dialog = create_browser_dialog(self, self.browser_bridge)
         self.browser_dialog.show()
         self.browser_dialog.raise_()
@@ -544,7 +556,7 @@ class UsagePet(QWidget):
             self.api_box.addWidget(caption("网页读取于 " + datetime.fromtimestamp(balance["checked_at"]).strftime("%m-%d %H:%M")))
         else:
             self.api_box.addWidget(caption("在 Chrome 登录官方余额页，选好对应组织，再连接扩展。"))
-        self.api_box.addWidget(caption("显示所选网页组织余额，不代表单个 Key 的独立预算。请保留余额标签页，以便定时刷新。"))
+        self.api_box.addWidget(caption("显示浏览器当前组织余额，不代表单个 Key 的独立预算。页面变化时同步，每分钟刷新查询。"))
         button = QPushButton("连接 Chrome 余额 ↗")
         button.clicked.connect(self.open_api_billing)
         self.api_box.addWidget(button)
@@ -788,8 +800,6 @@ class UsagePet(QWidget):
         v = self.interval.currentData()
         if isinstance(v, int):
             self.prefs["refresh_minutes"] = v
-            if self.browser_bridge is not None:
-                self.browser_bridge.refresh_minutes = v
             preferences.save(self.prefs)
             self.timer.start(v * 60000)
             self.update_timing()

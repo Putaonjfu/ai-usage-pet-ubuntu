@@ -1,12 +1,14 @@
-"""Session-only, authenticated loopback receiver for the companion extension."""
+"""Authenticated loopback receiver, with an optional persistent local pairing."""
 from __future__ import annotations
 
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import threading
 import time
 
@@ -14,9 +16,46 @@ DECIMAL = re.compile(r'-?\d{1,12}(?:\.\d{1,8})?\Z')
 EXTENSION_ORIGIN = re.compile(r'chrome-extension://[a-p]{32}\Z')
 
 
+def read_pairing(path):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor) as file:
+        info = os.fstat(file.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise OSError('本机配对文件权限应为 600，且归当前用户所有')
+        try:
+            data = json.loads(file.read(1024))
+            if (not isinstance(data, dict) or set(data) != {'port', 'token'}
+                    or type(data['port']) is not int or not 1 <= data['port'] <= 65535
+                    or not isinstance(data['token'], str)
+                    or not re.fullmatch(r'[a-f0-9]{64}', data['token'])):
+                raise ValueError()
+            return data
+        except (ValueError, UnicodeError) as exc:
+            raise OSError('本机配对文件损坏，请检查后重新配对') from exc
+
+
+def save_pairing(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(path.name + '.' + secrets.token_hex(8) + '.tmp')
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w') as file:
+            json.dump(data, file)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 class BalanceBridge:
-    def __init__(self, on_balance, refresh_minutes=5):
-        self.token = secrets.token_hex(32)
+    def __init__(self, on_balance, refresh_minutes=5, state_path=None):
+        saved = read_pairing(state_path) if state_path is not None else None
+        self.token = saved['token'] if saved else secrets.token_hex(32)
         self.refresh_minutes = max(1, min(60, int(refresh_minutes)))
         bridge = self
 
@@ -66,10 +105,14 @@ class BalanceBridge:
                     if not 0 < length <= 256 or self.headers.get_content_type() != 'application/json':
                         raise ValueError()
                     data = json.loads(self.rfile.read(length))
-                    if not isinstance(data, dict) or set(data) != {'balance'}:
+                    if (not isinstance(data, dict) or 'balance' not in data
+                            or set(data) - {'balance', 'sampled_at'}):
                         raise ValueError()
                     balance = data['balance']
                     if balance is not None and (not isinstance(balance, str) or not DECIMAL.fullmatch(balance)):
+                        raise ValueError()
+                    sampled = data.get('sampled_at', int(time.time()))
+                    if type(sampled) is not int or not 0 <= time.time() - sampled <= 150:
                         raise ValueError()
                 except (ValueError, UnicodeError, TimeoutError, OSError):
                     self.reply(400)
@@ -78,12 +121,19 @@ class BalanceBridge:
                     on_balance({})
                 else:
                     on_balance({'balance': format(Decimal(balance), 'f'), 'currency': 'USD',
-                                'checked_at': int(time.time()), 'source': 'chrome_web'})
+                                'checked_at': sampled, 'source': 'chrome_web'})
                 self.reply(200)
 
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.server = ThreadingHTTPServer(('127.0.0.1', saved['port'] if saved else 0), Handler)
         self.server.daemon_threads = True
         self.port = self.server.server_address[1]
+        if state_path is not None and saved is None:
+            try:
+                save_pairing(state_path, {'port': self.port, 'token': self.token})
+            except OSError:
+                self.server.server_close()
+                raise
+        self.closed = False
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        kwargs={'poll_interval': 0.1}, daemon=True)
         self.thread.start()
@@ -93,6 +143,9 @@ class BalanceBridge:
         return f'{self.port}:{self.token}'
 
     def close(self):
+        if self.closed:
+            return
+        self.closed = True
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=1)
@@ -112,7 +165,7 @@ def create_browser_dialog(parent, bridge):
     for text in [
         '1. 在系统 Chrome 打开 chrome://extensions，开启“开发者模式”，加载下面的扩展文件夹。',
         '2. 在 Chrome 登录 OpenAI 余额页，选择 API Key 所属组织，点击扩展图标。',
-        '3. 将连接码粘贴到扩展中，确认组织后连接。请保留该余额标签页。',
+        '3. 首次粘贴连接码并确认组织，之后自动重连。扩展会自动维护一个后台余额标签页。',
     ]:
         label = QLabel(text)
         label.setWordWrap(True)
@@ -130,7 +183,7 @@ def create_browser_dialog(parent, bridge):
     website = QPushButton('在默认浏览器打开 OpenAI 余额页')
     website.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(BILLING_URL)))
     layout.addWidget(website)
-    note = QLabel(f'扩展每 {bridge.refresh_minutes} 分钟刷新并读取该标签页，只将金额传给本机。连接码在小工具重启后失效。')
+    note = QLabel('配对保存在本机，浏览器和浮条重启后自动恢复。页面金额变化时立即同步，每分钟刷新查询；官网更新可能有延迟。')
     note.setWordWrap(True)
     layout.addWidget(note)
     dialog.status = QLabel('等待 Chrome 扩展连接…')

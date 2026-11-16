@@ -38,5 +38,3 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests
 ```
 
 后台日志：`~/.cache/ai-usage-pet/app.log`。卸载菜单和开机启动项：`bash uninstall.sh`。
-
-界面截图为演示数据。紧凑布局参考 [Clauddy](https://github.com/renatoaug/claude-usage-monitor)；图标为本项目 SVG。

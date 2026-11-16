@@ -58,6 +58,10 @@ class BalanceBridge:
         saved = read_pairing(state_path) if state_path is not None else None
         self.token = saved['token'] if saved else secrets.token_hex(32)
         self.refresh_minutes = max(1, min(60, int(refresh_minutes)))
+        self.last_contact_at = 0
+        self.last_balance_at = 0
+        self.last_state = 'waiting'
+        self.client_version = None
         bridge = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -75,14 +79,18 @@ class BalanceBridge:
             def valid_host(self):
                 return self.headers.get('Host') == f'127.0.0.1:{bridge.port}'
 
-            def reply(self, code):
-                body = json.dumps({'ok': code == 200, 'refresh_minutes': bridge.refresh_minutes}).encode()
+            def authenticated(self):
+                supplied = self.headers.get('Authorization', '')
+                return secrets.compare_digest(supplied.encode('utf-8'), ('Bearer ' + bridge.token).encode('ascii'))
+
+            def reply(self, code, payload=None):
+                body = json.dumps(payload if payload is not None else {'ok': code == 200, 'refresh_minutes': bridge.refresh_minutes}).encode()
                 self.send_response(code)
                 origin = self.headers.get('Origin', '')
                 if EXTENSION_ORIGIN.fullmatch(origin):
                     self.send_header('Access-Control-Allow-Origin', origin)
                     self.send_header('Vary', 'Origin')
-                    self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+                    self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
                     self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Cache-Control', 'no-store')
@@ -93,12 +101,21 @@ class BalanceBridge:
             def do_OPTIONS(self):
                 self.reply(200 if self.path == '/balance' and self.valid_host() and self.allowed_origin() else 403)
 
+            def do_GET(self):
+                if self.path != '/status' or not self.valid_host() or not self.allowed_origin():
+                    self.reply(403)
+                elif not self.authenticated():
+                    self.reply(401)
+                else:
+                    self.reply(200, {'ok': True, 'last_contact_at': bridge.last_contact_at,
+                        'last_balance_at': bridge.last_balance_at, 'state': bridge.last_state,
+                        'client_version': bridge.client_version})
+
             def do_POST(self):
                 if self.path != '/balance' or not self.valid_host() or not self.allowed_origin():
                     self.reply(403)
                     return
-                supplied = self.headers.get('Authorization', '')
-                if not secrets.compare_digest(supplied.encode('utf-8'), ('Bearer ' + bridge.token).encode('ascii')):
+                if not self.authenticated():
                     self.reply(401)
                     return
                 try:
@@ -106,10 +123,16 @@ class BalanceBridge:
                     if not 0 < length <= 256 or self.headers.get_content_type() != 'application/json':
                         raise ValueError()
                     data = json.loads(self.rfile.read(length))
+                    version = data.pop('client_version', None) if isinstance(data, dict) else None
+                    if version is not None and (not isinstance(version, str) or not re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){2,3}', version)):
+                        raise ValueError()
                     if isinstance(data, dict) and set(data) == {'state'}:
                         if not isinstance(data['state'], str) or data['state'] not in STATES:
                             raise ValueError()
-                        on_balance({'state': data['state'], 'received_at': int(time.time())})
+                        bridge.last_contact_at = int(time.time())
+                        bridge.last_state = data['state']
+                        bridge.client_version = version
+                        on_balance({'state': data['state'], 'received_at': bridge.last_contact_at})
                         self.reply(200)
                         return
                     if (not isinstance(data, dict) or 'balance' not in data
@@ -125,10 +148,15 @@ class BalanceBridge:
                     self.reply(400)
                     return
                 if balance is None:
+                    bridge.last_state = 'read_failed'
                     on_balance({})
                 else:
+                    bridge.last_state = 'connected'
+                    bridge.last_balance_at = int(time.time())
                     on_balance({'balance': format(Decimal(balance), 'f'), 'currency': 'USD',
                                 'checked_at': sampled, 'source': 'chrome_web'})
+                bridge.last_contact_at = int(time.time())
+                bridge.client_version = version
                 self.reply(200)
 
         self.server = ThreadingHTTPServer(('127.0.0.1', saved['port'] if saved else 0), Handler)
@@ -172,7 +200,7 @@ def create_browser_dialog(parent, bridge):
     for text in [
         '1. 在系统 Chrome 打开 chrome://extensions，开启“开发者模式”，加载下面的扩展文件夹。',
         '2. 在 Chrome 登录 OpenAI 余额页，选择 API Key 所属组织，点击扩展图标。',
-        '3. 首次粘贴连接码并确认组织，之后自动重连。扩展会自动维护一个后台余额标签页。',
+        '3. 首次粘贴连接码并确认组织，之后自动重连。扩展会创建独立的最小化余额窗口。',
     ]:
         label = QLabel(text)
         label.setWordWrap(True)
@@ -190,7 +218,7 @@ def create_browser_dialog(parent, bridge):
     website = QPushButton('在默认浏览器打开 OpenAI 余额页')
     website.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(BILLING_URL)))
     layout.addWidget(website)
-    note = QLabel('配对保存在本机。每分钟刷新官网；启用 Chrome“关闭后继续运行后台应用”后可自动维护最小化余额窗口。完全退出 Chrome 会停止更新。')
+    note = QLabel('独立余额窗口请保持最小化，普通 Chrome 窗口可以关闭。完全退出 Chrome 会停止更新；网页登录失效时，在扩展中点“打开独立余额窗口”。')
     note.setWordWrap(True)
     layout.addWidget(note)
     dialog.status = QLabel('等待 Chrome 扩展连接…')

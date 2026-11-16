@@ -89,6 +89,26 @@ class BrowserBridge(unittest.TestCase):
         self.assertEqual(self.post({'state': 'arbitrary page text'})[0], 400)
         self.assertEqual(self.post({'state': 'refreshing', 'cookies': 'no'})[0], 400)
 
+    def test_diagnostics_prove_receipts_without_exposing_balance_or_pairing(self):
+        def get_status(authorization):
+            connection = http.client.HTTPConnection('127.0.0.1', self.bridge.port, timeout=3)
+            connection.request('GET', '/status', headers={'Authorization': authorization})
+            response = connection.getresponse()
+            result = response.status, json.loads(response.read())
+            connection.close()
+            return result
+        self.assertEqual(get_status('Bearer wrong')[0], 401)
+        self.assertEqual(self.post({'balance': '12.34', 'client_version': '1.3.0'})[0], 200)
+        status, diagnostic = get_status('Bearer ' + self.bridge.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(diagnostic['client_version'], '1.3.0')
+        self.assertEqual(diagnostic['state'], 'connected')
+        self.assertGreater(diagnostic['last_balance_at'], 0)
+        self.assertNotIn('balance', diagnostic)
+        self.assertNotIn(self.bridge.token, json.dumps(diagnostic))
+        self.assertEqual(self.post({'state': 'refreshing', 'client_version': '1.3.0'})[0], 200)
+        self.assertEqual(self.post({'balance': '12.34', 'client_version': 'not a version'})[0], 400)
+
 
 if __name__ == '__main__':
     unittest.main()

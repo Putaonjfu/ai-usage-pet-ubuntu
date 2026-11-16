@@ -27,7 +27,7 @@ async function sendPayload(connection, payload) {
   try {
     response = await fetch(`http://127.0.0.1:${connection.port}/balance`, {
       method: 'POST', headers: {'Content-Type': 'application/json', Authorization: `Bearer ${connection.token}`},
-      body: JSON.stringify(payload), credentials: 'omit', cache: 'no-store', redirect: 'error',
+      body: JSON.stringify({...payload, client_version: chrome.runtime.getManifest().version}), credentials: 'omit', cache: 'no-store', redirect: 'error',
       signal: AbortSignal.timeout(5000)
     });
   } catch { throw new Error('等待浮条启动，将自动重连'); }
@@ -45,12 +45,10 @@ async function ensureAlarm() {
   if (!(await chrome.alarms.get(ALARM))) await chrome.alarms.create(ALARM, {periodInMinutes: 1});
 }
 
-async function createMonitorTab() {
-  const windows = await chrome.windows.getAll({windowTypes: ['normal']});
-  if (windows.length) return chrome.tabs.create({url: BILLING, active: false});
-  // Chrome can keep the extension alive with no open windows. Restore a
-  // minimized monitor instead of requiring the user to launch a browser window.
-  const window = await chrome.windows.create({url: BILLING, state: 'minimized', focused: false});
+async function createMonitorTab(url = BILLING) {
+  // Always use an independent window, even while ordinary browser windows are
+  // open. Closing an ordinary window must not close the monitor's document.
+  const window = await chrome.windows.create({url, state: 'minimized', focused: false});
   const tab = window?.tabs?.[0] || (window && (await chrome.tabs.query({windowId: window.id}))[0]);
   if (!tab) throw failure('page_missing', '后台余额窗口暂不可用，将自动重试');
   return tab;
@@ -62,22 +60,44 @@ async function boundTab() {
   if (binding) {
     try {
       previous = await chrome.tabs.get(binding.tabId);
-      if (isBilling(previous.url)) return previous;
+      if (binding.dedicated && isBilling(previous.url)) return previous;
     } catch {}
   }
   const tabs = (await chrome.tabs.query({url: 'https://platform.openai.com/*'})).filter(tab => isBilling(tab.url));
-  if (tabs.length > 1) throw failure('multiple_pages', '有多个余额页，请选中要同步的标签，在扩展中点击“使用当前页”');
+  let source = isBilling(previous?.url) ? previous : undefined;
+  // After a browser restart, reuse a single minimized billing window instead
+  // of creating another one. No user tabs are moved or closed.
+  if (!source) {
+    const monitors = [];
+    for (const tab of tabs) {
+      const window = await chrome.windows.get(tab.windowId, {populate: true});
+      if (window.state === 'minimized' && window.tabs?.length === 1) monitors.push(tab);
+    }
+    if (monitors.length === 1) {
+      const tab = monitors[0];
+      await chrome.storage.session.set({binding: {tabId: tab.id, windowId: tab.windowId, dedicated: true}});
+      return tab;
+    }
+    if (tabs.length > 1) throw failure('multiple_pages', '有多个余额页，请选中要同步的标签，在扩展中点击“使用当前页”');
+    source = tabs[0];
+  }
   // Prefer an already-open billing page after login opens a new tab. A bound
   // tab that navigated to an unrelated site must not block monitoring forever.
-  if (!tabs.length && previous) {
+  if (!source && previous && binding.dedicated) {
     try {
       const url = new URL(previous.url);
       if (url.protocol === 'https:' && ['auth.openai.com', 'auth0.openai.com', 'accounts.google.com'].includes(url.hostname))
         return previous;
     } catch {}
   }
-  const tab = tabs[0] || await createMonitorTab();
-  await chrome.storage.session.set({binding: {tabId: tab.id}});
+  // An existing dedicated monitor that finishes login in another tab can be
+  // navigated back safely; it is owned by this extension, not the user's tab.
+  if (source && previous && binding.dedicated) {
+    const tab = await chrome.tabs.update(previous.id, {url: source.url});
+    return tab;
+  }
+  const tab = await createMonitorTab(source?.url || BILLING);
+  await chrome.storage.session.set({binding: {tabId: tab.id, windowId: tab.windowId, dedicated: true}});
   return tab;
 }
 
@@ -99,8 +119,12 @@ function waitForTab(tabId, reload) {
 }
 
 async function readTab(tab, reload) {
+  if (tab.status !== 'complete') {
+    await waitForTab(tab.id, false);
+    tab = await chrome.tabs.get(tab.id);
+  }
   if (!isBilling(tab.url)) throw failure('login_required', '请在后台余额标签页完成登录；返回余额页后自动恢复');
-  if (reload || tab.status !== 'complete') await waitForTab(tab.id, reload);
+  if (reload) await waitForTab(tab.id, true);
   if (!isBilling((await chrome.tabs.get(tab.id)).url))
     throw failure('login_required', '网页已跳转，请完成登录并返回余额页；无需重新配对');
   const results = await chrome.scripting.executeScript({target: {tabId: tab.id}, files: ['reader.js']});
@@ -182,6 +206,13 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       return sync();
     }
     if (message.type === 'sync') return sync(true);
+    if (message.type === 'open_monitor') {
+      if (!(await chrome.storage.local.get('connection')).connection) return {ok: false, message: '请先配对一次'};
+      const tab = await boundTab();
+      await chrome.windows.update(tab.windowId, {state: 'normal', focused: true});
+      await chrome.tabs.update(tab.id, {active: true});
+      return {ok: true, message: '已打开独立余额窗口；完成登录后可最小化，让它继续查询'};
+    }
     if (message.type === 'disconnect') {
       const {connection} = await chrome.storage.local.get('connection');
       if (connection) { try { await sendState(connection, 'disconnected'); } catch {} }

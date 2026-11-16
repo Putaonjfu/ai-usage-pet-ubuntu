@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QMenu, QComboBox,
 )
 
-from widgets import PetScene, WindowDrag
+from widgets import PetScene, WindowDrag, ProviderSelector
 
 from providers import refresh_all, save_deepseek_key, delete_deepseek_key
 import preferences
@@ -217,47 +217,60 @@ class UsagePet(QWidget):
         ribbon_layout.addWidget(self.scene)
         text = QVBoxLayout()
         text.setContentsMargins(0, 0, 0, 0)
-        text.setSpacing(1)
+        text.setSpacing(0)
         top = QHBoxLayout()
         top.setSpacing(0)
-        self.provider_selector = QComboBox()
-        self.provider_selector.addItem("Codex ▾", "codex")
-        self.provider_selector.addItem("DeepSeek ▾", "deepseek")
-        self.provider_selector.addItem("OpenAI API ▾", "openai")
-        self.provider_selector.setStyleSheet("QComboBox {background: transparent; border: none; border-radius: 0px; padding: 0px; min-height: 0px; font-size: 10px; color: #777184;} QComboBox::drop-down {width: 0px;}")
-        self.provider_selector.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.provider_selector.setFixedHeight(18)
+        self.provider_selector = ProviderSelector()
+        self.provider_selector.addItem("Codex", "codex")
+        self.provider_selector.addItem("DeepSeek", "deepseek")
+        self.provider_selector.addItem("OpenAI API", "openai")
+        arrow = (APP_DIR / "assets" / "chevron-down.svg").as_posix()
+        self.provider_selector.setStyleSheet(f"""
+            QComboBox {{background:#eeeaf5; border:1px solid #e3ddef; border-radius:7px;
+                padding:0px 2px 0px 8px; min-height:0px; font-size:13px; font-weight:600; color:#67577f;}}
+            QComboBox:hover {{background:#e6e0f1; border-color:#c9bcdf;}}
+            QComboBox:focus {{border-color:#a28cc5;}}
+            QComboBox::drop-down {{subcontrol-origin:padding; subcontrol-position:top right; width:18px; border:none;}}
+            QComboBox::down-arrow {{image:url("{arrow}"); width:10px; height:6px;}}
+            QComboBox QAbstractItemView {{font-size:13px; padding:5px; min-width:180px;
+                background:#faf9f6; border:1px solid #dfd8ea; selection-background-color:#e9e2f4;}}
+        """)
+        self.provider_selector.setFixedSize(112, 24)
+        self.provider_selector.setToolTip("切换用量来源")
         self.provider_selector.setCurrentIndex(max(0, self.provider_selector.findData(self.prefs.get("selected_provider", "codex"))))
         self.provider_selector.currentIndexChanged.connect(self.provider_changed)
-        top.addWidget(self.provider_selector, 1)
+        top.addStretch(1)
+        top.addWidget(self.provider_selector)
+        top.addSpacing(8)
         menu_button = QPushButton("⋯")
         menu_button.setToolTip("刷新、设置、退出")
-        menu_button.setFixedSize(20, 18)
-        menu_button.setStyleSheet("padding: 0; background: transparent; color: #8e8799; font-weight: 700;")
+        menu_button.setFixedSize(24, 24)
+        menu_button.setStyleSheet("padding:0; background:transparent; color:#8e8799; font-size:16px; font-weight:700;")
         menu_button.clicked.connect(lambda: self.show_actions(menu_button))
         top.addWidget(menu_button)
         text.addLayout(top)
         value_row = QHBoxLayout()
         value_row.setSpacing(5)
         self.hero_value = QLabel("—")
+        self.hero_value.setFixedHeight(26)
         self.hero_value.setStyleSheet("font-size: 22px; font-weight: 600; color: #67577f;")
         self.drag.attach(self.hero_value)
         value_row.addWidget(self.hero_value)
         self.hero_caption = QLabel("等待数据")
-        self.hero_caption.setStyleSheet("font-size: 10px; color: #908997;")
+        self.hero_caption.setStyleSheet("font-size: 11px; color: #908997;")
         self.hero_caption.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.drag.attach(self.hero_caption)
         value_row.addWidget(self.hero_caption, 1)
         self.toggle_button = QPushButton("⌄")
         self.toggle_button.setToolTip("展开 / 收起完整额度")
-        self.toggle_button.setFixedSize(18, 22)
+        self.toggle_button.setFixedSize(24, 24)
         self.toggle_button.setStyleSheet("padding: 0; background: transparent; color: #8b849a; font-size: 16px;")
         self.toggle_button.clicked.connect(self.toggle)
         value_row.addWidget(self.toggle_button)
         text.addLayout(value_row)
         self.mini_note = QLabel("正在连接…")
-        self.mini_note.setStyleSheet("font-size: 10px; color: #8b8594;")
-        self.mini_note.setFixedHeight(15)
+        self.mini_note.setStyleSheet("font-size: 11px; color: #8b8594;")
+        self.mini_note.setFixedHeight(14)
         self.mini_note.linkActivated.connect(lambda _: self.open_api_billing())
         self.drag.attach(self.mini_note)
         text.addWidget(self.mini_note)
@@ -392,7 +405,8 @@ class UsagePet(QWidget):
         plan = result.get("plan") or next((b.get("plan") for b in result.get("buckets", []) if b.get("plan")), None)
         plan_label = {"plus": "Plus", "pro": "Pro", "prolite": "Pro Lite"}.get(plan, str(plan).title() if plan else "套餐未知")
         api_mode = result.get("mode") == "api"
-        self.provider_selector.setItemText(0, "Codex · API ▾" if api_mode else "Codex · " + plan_label + " ▾")
+        self.provider_selector.setItemText(0, "Codex · API" if api_mode else "Codex · " + plan_label)
+        self.provider_selector.setToolTip("切换用量来源 · 当前：" + self.provider_selector.currentText())
         self.codex_box.parentWidget().setVisible(provider == "codex")
         self.ds_box.parentWidget().setVisible(provider == "deepseek")
         self.api_box.parentWidget().setVisible(provider == "openai")

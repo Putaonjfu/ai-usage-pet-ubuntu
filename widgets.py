@@ -2,7 +2,29 @@
 import math
 from PySide6.QtCore import QObject, QEvent, Qt, QTimer, QRectF
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QWidget, QComboBox, QStyle, QStyleOptionComboBox, QStylePainter
+
+
+class ProviderSelector(QComboBox):
+    """Keep the closed control readable, and ignore accidental wheel switching."""
+    def paintEvent(self, event):
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        field = self.style().subControlRect(QStyle.ComplexControl.CC_ComboBox, option,
+                                           QStyle.SubControl.SC_ComboBoxEditField, self)
+        if option.fontMetrics.horizontalAdvance(option.currentText) > field.width():
+            # Full plan names stay in the menu and tooltip, instead of clipping.
+            option.currentText = 'Codex' if self.currentData() == 'codex' else option.fontMetrics.elidedText(
+                option.currentText, Qt.TextElideMode.ElideRight, field.width())
+        painter = QStylePainter(self)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
+
+    def wheelEvent(self, event):
+        if self.view().isVisible():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
 
 
 class WindowDrag(QObject):

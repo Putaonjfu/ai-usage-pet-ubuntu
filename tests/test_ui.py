@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import patch, Mock
 from copy import deepcopy
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from PySide6.QtCore import Qt, QEvent, QPointF
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import Qt, QEvent, QPointF, QPoint
+from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QProgressBar
 from PySide6.QtTest import QTest
 from main import UsagePet
@@ -225,6 +225,15 @@ class UI(unittest.TestCase):
         self.assertEqual(self.pet.width(), 240)
         self.assertLessEqual(self.pet.height(), small_height)
         self.assertFalse(self.pet.scroll.isVisible())
+
+    def test_scrolling_over_closed_provider_selector_does_not_switch_source(self):
+        selector = self.pet.provider_selector
+        before = selector.currentIndex()
+        event = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, -120),
+                            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                            Qt.ScrollPhase.NoScrollPhase, False)
+        self.app.sendEvent(selector, event)
+        self.assertEqual(selector.currentIndex(), before)
 
     def test_avatar_click_does_not_toggle_and_doubleclick_does(self):
         QTest.mouseClick(self.pet.scene, Qt.MouseButton.LeftButton)

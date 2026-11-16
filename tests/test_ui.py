@@ -1,0 +1,140 @@
+"""UI regression checks without network access or writes to user preferences."""
+import os
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch, Mock
+from copy import deepcopy
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from PySide6.QtCore import Qt, QEvent, QPointF
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication, QProgressBar
+from PySide6.QtTest import QTest
+from main import UsagePet
+from widgets import WindowDrag
+
+DATA = {'checked_at': 1800000000, 'codex': {'ok': True, 'data': {
+    'email': 'demo@example.com', 'plan': 'plus', 'buckets': [
+        {'id': 'codex', 'windows': [
+            {'remaining': 76, 'duration_mins': 300, 'resets_at': 1800003600},
+            {'remaining': 42, 'duration_mins': 10080, 'resets_at': 1800400000}]}],
+    'resets': {'available': 2, 'details': []}}},
+    'deepseek': {'ok': True, 'data': {'balances': [
+        {'currency': 'CNY', 'total': '28.50', 'topped_up': '25', 'granted': '3.50'}], 'is_available': True}}}
+
+class UI(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        patch('preferences.save').start()
+        self.no_refresh = patch.object(UsagePet, 'refresh').start()
+        patch.object(UsagePet, 'create_tray', lambda w: setattr(w, 'tray', None)).start()
+        self.pet = UsagePet(self.app)
+        self.pet.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.hide()
+        self.pet.deleteLater()
+        self.app.processEvents()
+        patch.stopall()
+
+    def test_live_data_and_unavailable_clear_previous_values(self):
+        self.pet.updated(DATA)
+        self.app.processEvents()
+        self.assertEqual((self.pet.width(), self.pet.height()), (240, 88))
+        self.assertEqual(self.pet.scene.remaining, 42)
+        self.pet.toggle()
+        self.app.processEvents()
+        bars = self.pet.codex_box.parentWidget().findChildren(QProgressBar)
+        self.assertEqual([b.value() for b in bars if b.isVisible()], [760, 420])
+        self.pet.toggle()
+        self.assertEqual(self.pet.hero_value.text(), '42%')
+        self.assertIn('Plus', self.pet.provider_selector.itemText(0))
+        self.pet.provider_selector.setCurrentIndex(1)
+        self.assertEqual(self.pet.hero_value.text(), '¥28.50')
+        self.assertEqual(self.pet.quota_windows, [])
+        self.pet.updated({'checked_at': 1800000001, 'codex': {'ok': False, 'error': '读取失败'}, 'deepseek': {'ok': False, 'error': '余额读取失败'}})
+        self.assertEqual(self.pet.hero_value.text(), '—')
+        self.assertIn('余额读取失败', self.pet.balance_line.text())
+        self.pet.provider_selector.setCurrentIndex(0)
+        self.assertIn('读取失败', self.pet.balance_line.text())
+        self.assertEqual(self.pet.summary_reset.text(), '—')
+        self.assertEqual(self.pet.quota_windows, [])
+
+    def test_prolite_only_renders_returned_weekly_window(self):
+        data = deepcopy(DATA)
+        result = data['codex']['data']
+        result['plan'] = 'prolite'
+        result['buckets'][0]['windows'] = [{'remaining': 8, 'duration_mins': 10080, 'resets_at': 1800400000}]
+        self.pet.updated(data)
+        self.assertIn('Pro Lite', self.pet.provider_selector.itemText(0))
+        self.assertEqual(len(self.pet.quota_windows), 1)
+        self.assertEqual(self.pet.hero_value.text(), '8%')
+        self.assertIn('每周', self.pet.hero_caption.text())
+        self.assertNotIn('5 小时', str(self.pet.quota_windows))
+        self.assertEqual(self.pet.scene.remaining, 8)
+
+    def test_all_buckets_are_visible_not_truncated_to_two(self):
+        data = deepcopy(DATA)
+        data['codex']['data']['buckets'].append({'id': 'special', 'name': 'Special', 'windows': [
+            {'remaining': 33, 'duration_mins': 60}, {'remaining': 44, 'duration_mins': 1440}]})
+        self.pet.updated(data)
+        self.assertEqual(len(self.pet.quota_windows), 4)
+        self.app.processEvents()
+        self.assertEqual(self.pet.height(), 88)
+        self.pet.toggle()
+        self.app.processEvents()
+        bars = self.pet.codex_box.parentWidget().findChildren(QProgressBar)
+        self.assertEqual(len([b for b in bars if b.isVisible()]), 4)
+
+    def test_expand_collapse_and_settings(self):
+        small_height = self.pet.height()
+        QTest.mouseClick(self.pet.toggle_button, Qt.MouseButton.LeftButton)
+        self.app.processEvents()
+        self.assertTrue(self.pet.scroll.isVisible())
+        self.assertEqual(self.pet.width(), 320)
+        self.pet.show_settings()
+        self.assertTrue(self.pet.settings_dialog.isVisible())
+        self.assertFalse(self.pet.settings_dialog.isModal())
+        self.pet.settings_dialog.hide()
+        self.pet.toggle()
+        self.app.processEvents()
+        self.assertEqual(self.pet.width(), 240)
+        self.assertLessEqual(self.pet.height(), small_height)
+        self.assertFalse(self.pet.scroll.isVisible())
+
+    def test_avatar_click_does_not_toggle_and_doubleclick_does(self):
+        QTest.mouseClick(self.pet.scene, Qt.MouseButton.LeftButton)
+        self.assertFalse(self.pet.expanded)
+        QTest.mouseDClick(self.pet.scene, Qt.MouseButton.LeftButton)
+        self.assertTrue(self.pet.expanded)
+
+    def test_drag_requests_native_move_and_wayland_has_no_manual_fallback(self):
+        window = Mock()
+        window.frameGeometry.return_value.topLeft.return_value = QPointF(0, 0).toPoint()
+        window.windowHandle.return_value.startSystemMove.return_value = True
+        drag = WindowDrag(self.pet)
+        drag.window = window
+        def event(kind, pos):
+            return QMouseEvent(kind, QPointF(pos, pos), QPointF(pos, pos), Qt.MouseButton.LeftButton,
+                               Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        drag.eventFilter(self.pet.scene, event(QEvent.Type.MouseButtonPress, 10))
+        window.windowHandle.return_value.startSystemMove.assert_called_once()
+        drag.eventFilter(self.pet.scene, event(QEvent.Type.MouseMove, 30))
+        window.move.assert_not_called()
+        window.windowHandle.return_value.startSystemMove.return_value = False
+        drag.eventFilter(self.pet.scene, event(QEvent.Type.MouseButtonPress, 10))
+        with patch('widgets.QApplication.platformName', return_value='wayland'):
+            drag.eventFilter(self.pet.scene, event(QEvent.Type.MouseMove, 30))
+        window.move.assert_not_called()
+        with patch('widgets.QApplication.platformName', return_value='xcb'):
+            drag.eventFilter(self.pet.scene, event(QEvent.Type.MouseMove, 30))
+        window.move.assert_called_once()
+
+if __name__ == '__main__':
+    unittest.main()

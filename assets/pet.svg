@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <radialGradient id="shell" cx="42%" cy="30%" r="75%">
+      <stop stop-color="#203651"/><stop offset="1" stop-color="#0d1528"/>
+    </radialGradient>
+    <linearGradient id="energy" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#9df7ff"/><stop offset=".5" stop-color="#47cce8"/><stop offset="1" stop-color="#a391ff"/>
+    </linearGradient>
+  </defs>
+  <circle cx="64" cy="64" r="60" fill="url(#shell)"/>
+  <circle cx="64" cy="64" r="56" fill="none" stroke="#39546e" stroke-width="1.5"/>
+  <path d="M64 27 96 45v38L64 101 32 83V45Z" fill="#142a40" stroke="url(#energy)" stroke-width="3" stroke-linejoin="round"/>
+  <path d="m64 36 24 14v28L64 92 40 78V50Z" fill="none" stroke="#46617e" stroke-width="1.5"/>
+  <g fill="none" stroke="#64d8ee" stroke-width="2.5" stroke-linecap="round">
+    <path d="M64 17v10m0 74v10M17 64h15m64 0h15"/>
+    <path d="m22 40 10 6m64 36 10 6M22 88l10-6m64-36 10-6"/>
+  </g>
+  <path d="m64 45 18 19-18 19-18-19Z" fill="url(#energy)"/>
+  <path d="m64 53 10 11-10 11-10-11Z" fill="#12263c"/>
+  <path d="m64 60 4 4-4 4-4-4Z" fill="#d7fcff"/>
+  <g fill="#b5edfb"><circle cx="64" cy="17" r="2"/><circle cx="111" cy="64" r="2"/><circle cx="64" cy="111" r="2"/><circle cx="17" cy="64" r="2"/></g>
+</svg>

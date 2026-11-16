@@ -6,7 +6,7 @@
 
 ## 安装与启动
 
-需要 Python 3.10+，以及已通过 ChatGPT 账户登录的 [Codex CLI](https://github.com/openai/codex)。
+需要 Python 3.10+，以及已登录的 [Codex CLI](https://github.com/openai/codex)。
 
 ```bash
 git clone https://github.com/Putaonjfu/ai-usage-pet-ubuntu.git
@@ -26,7 +26,7 @@ bash install.sh
 - DeepSeek Key 在设置中填写，保存到系统密钥环；也支持 `DEEPSEEK_API_KEY` 环境变量。
 - 设置中可开启登录后自动启动。
 
-Codex 按接口返回的套餐和额度窗口显示，不固定添加 5 小时额度。DeepSeek 查询 API 余额。程序不执行模型任务，不使用重置卡。
+Codex 自动识别登录方式：ChatGPT 账号显示套餐额度；API Key 登录显示 API 模式。普通 OpenAI API Key 无公开的剩余余额查询接口，点击浮条链接可打开官方账单页，不将花费或 Token 量冒充余额。账号额度按接口返回的窗口显示，不固定添加 5 小时额度。DeepSeek 查询 API 余额。程序不执行模型任务，不使用重置卡。
 
 Codex 优先沿用代理环境变量；未设置时读取 GNOME 已配置的手动 HTTP/HTTPS 代理。Wayland 下置顶行为由桌面合成器决定。
 

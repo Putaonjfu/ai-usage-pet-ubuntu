@@ -248,6 +248,41 @@ def parse_codex_rate_limits(response: dict) -> dict:
     return {"buckets": buckets, "resets": reset_info}
 
 
+def api_mode_info(config: dict) -> dict:
+    """Public provider metadata only. Never read or export API credentials."""
+    from urllib.parse import urlsplit
+    provider_id = config.get("model_provider") or "openai"
+    providers = config.get("model_providers") or {}
+    provider = providers.get(provider_id) or {}
+    base_url = provider.get("base_url") or (os.environ.get("OPENAI_BASE_URL") if provider_id == "openai" else None)
+    base_url = base_url or ("https://api.openai.com/v1" if provider_id == "openai" else "")
+    try:
+        host = urlsplit(base_url).hostname or ""
+    except ValueError:
+        host = ""
+    official = host == "api.openai.com"
+    return {
+        "mode": "api",
+        "plan": None,
+        "buckets": [],
+        "resets": None,
+        "api": {
+            "provider": "OpenAI" if official else "第三方 API",
+            "host": host,
+            "balance": None,
+            "status": "unavailable",
+            "message": "普通 API Key 无法通过公开接口读取剩余余额，请在 OpenAI 账单页查看。" if official else "此平台的余额接口尚未适配。",
+            "billing_url": "https://platform.openai.com/settings/organization/billing/overview" if official else None,
+        },
+    }
+
+
+def uses_external_api(config: dict) -> bool:
+    provider_id = config.get("model_provider") or "openai"
+    provider = (config.get("model_providers") or {}).get(provider_id) or {}
+    return provider_id != "openai" and provider.get("requires_openai_auth", False) is False
+
+
 def fetch_codex() -> dict:
     path = locate_codex()
     if not path:
@@ -255,8 +290,19 @@ def fetch_codex() -> dict:
     with CodexRPC(path) as conn:
         account = conn.request("account/read", {"refreshToken": False})
         account_data = account.get("account")
-        if not isinstance(account_data, dict) or account_data.get("type") != "chatgpt":
-            raise ProviderError("Codex 尚未通过 ChatGPT 登录。请先在终端运行 codex login（API Key 模式无法读取 ChatGPT 套餐用量）")
+        # config/read resolves active provider/profile layering without changing it.
+        config = {}
+        try:
+            value = conn.request("config/read", {"includeLayers": False}).get("config")
+            if isinstance(value, dict):
+                config = value
+        except ProviderError:
+            pass
+        auth_type = account_data.get("type") if isinstance(account_data, dict) else None
+        if auth_type in ("apiKey", "apikey") or uses_external_api(config):
+            return api_mode_info(config)
+        if auth_type != "chatgpt":
+            raise ProviderError("Codex 未登录，或当前凭据类型不支持额度查询。请检查 codex login status。")
         rate_data = conn.request("account/rateLimits/read")
         parsed = parse_codex_rate_limits(rate_data)
         # Activity statistics are optional and should never block rate-limit display.
@@ -270,6 +316,7 @@ def fetch_codex() -> dict:
         except ProviderError:
             pass
         return {
+            "mode": "chatgpt",
             "email": account_data.get("email"),
             "plan": account_data.get("planType"),
             "buckets": parsed["buckets"],

@@ -92,6 +92,28 @@ class UI(unittest.TestCase):
         bars = self.pet.codex_box.parentWidget().findChildren(QProgressBar)
         self.assertEqual(len([b for b in bars if b.isVisible()]), 4)
 
+    def test_switching_to_api_clears_plan_quota_and_resets(self):
+        from providers import api_mode_info
+        data = deepcopy(DATA)
+        self.pet.updated(data)
+        self.assertEqual(self.pet.hero_value.text(), '42%')
+        data['codex']['data'] = api_mode_info({})
+        self.pet.updated(data)
+        self.app.processEvents()
+        self.assertEqual(self.pet.hero_value.text(), '—')
+        self.assertIn('API', self.pet.provider_selector.itemText(0))
+        self.assertEqual(self.pet.quota_windows, [])
+        self.assertIsNone(self.pet.scene.remaining)
+        self.assertEqual(self.pet.summary_reset.text(), '—')
+        self.assertIn('余额需官网查看', self.pet.mini_note.text())
+        self.assertEqual((self.pet.width(), self.pet.height()), (240, 88))
+        with patch('main.QDesktopServices.openUrl') as open_url:
+            self.pet.open_api_billing()
+            self.assertEqual(open_url.call_args.args[0].toString(), 'https://platform.openai.com/settings/organization/billing/overview')
+        self.pet.updated(DATA)
+        self.assertEqual(self.pet.hero_value.text(), '42%')
+        self.assertEqual(self.pet.scene.remaining, 42)
+
     def test_expand_collapse_and_settings(self):
         small_height = self.pet.height()
         QTest.mouseClick(self.pet.toggle_button, Qt.MouseButton.LeftButton)

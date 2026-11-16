@@ -7,8 +7,8 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl
+from PySide6.QtGui import QIcon, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar,
@@ -246,6 +246,7 @@ class UsagePet(QWidget):
         self.mini_note = QLabel("正在连接…")
         self.mini_note.setStyleSheet("font-size: 10px; color: #8b8594;")
         self.mini_note.setFixedHeight(15)
+        self.mini_note.linkActivated.connect(lambda _: self.open_api_billing())
         self.drag.attach(self.mini_note)
         text.addWidget(self.mini_note)
         ribbon_layout.addLayout(text, 1)
@@ -355,6 +356,8 @@ class UsagePet(QWidget):
         menu.addAction("收起详情" if self.expanded else "查看全部额度", self.toggle)
         menu.addAction("刷新用量", self.refresh)
         menu.addAction("设置", self.show_settings)
+        if self.provider_selector.currentData() == "codex" and self.current.get("codex", {}).get("data", {}).get("api", {}).get("billing_url"):
+            menu.addAction("查看 API 余额", self.open_api_billing)
         menu.addSeparator()
         menu.addAction(self.polling_text()).setEnabled(False)
         menu.addSeparator()
@@ -373,7 +376,8 @@ class UsagePet(QWidget):
         result = codex.get("data", {})
         plan = result.get("plan") or next((b.get("plan") for b in result.get("buckets", []) if b.get("plan")), None)
         plan_label = {"plus": "Plus", "pro": "Pro", "prolite": "Pro Lite"}.get(plan, str(plan).title() if plan else "套餐未知")
-        self.provider_selector.setItemText(0, "Codex · " + plan_label + " ▾")
+        api_mode = result.get("mode") == "api"
+        self.provider_selector.setItemText(0, "Codex · API ▾" if api_mode else "Codex · " + plan_label + " ▾")
         self.codex_box.parentWidget().setVisible(provider == "codex")
         self.ds_box.parentWidget().setVisible(provider == "deepseek")
         self.hero_value.setText("—")
@@ -382,6 +386,9 @@ class UsagePet(QWidget):
             self.hero_caption.setText("剩余额度")
             if not codex.get("ok"):
                 self.balance_line.setText(codex.get("error", "正在读取 Codex 账户…"))
+            elif api_mode:
+                self.hero_caption.setText("API 余额")
+                self.balance_line.setText(result["api"]["message"])
             else:
                 buckets = result.get("buckets", [])
                 windows = []
@@ -434,7 +441,16 @@ class UsagePet(QWidget):
         codex = self.current.get("codex", {})
         ds = self.current.get("deepseek", {})
         details = self.balance_line.text()
-        if provider == "codex" and codex.get("ok") and self.quota_windows:
+        is_api = codex.get("data", {}).get("mode") == "api"
+        if provider == "codex" and codex.get("ok") and is_api:
+            self.mini_note.removeEventFilter(self.drag)
+            self.mini_note.setCursor(Qt.CursorShape.PointingHandCursor)
+            if codex["data"]["api"].get("billing_url"):
+                self.mini_note.setText('<a href="billing" style="color:#8b8594; text-decoration:none;">余额需官网查看 ↗</a>')
+            else:
+                self.mini_note.setText("余额接口未适配")
+        elif provider == "codex" and codex.get("ok") and self.quota_windows:
+            self.drag.attach(self.mini_note)
             buckets = codex["data"].get("buckets", [])
             windows = [w for b in buckets if b.get("id") == "codex" for w in b.get("windows", [])] or self.quota_windows
             limiting = min(windows, key=lambda w: w["remaining"])
@@ -442,6 +458,7 @@ class UsagePet(QWidget):
             self.mini_note.setText(text)
             details = timing + "\n" + details
         elif provider == "deepseek" and ds.get("ok"):
+            self.drag.attach(self.mini_note)
             self.mini_note.setText(self.sync.text())
         else:
             self.mini_note.setText("读取失败 · 查看详情" if self.current else "正在连接…")
@@ -449,6 +466,12 @@ class UsagePet(QWidget):
         self.root.setToolTip(tooltip)
         self.hero_value.setToolTip(tooltip)
         self.mini_note.setToolTip(tooltip)
+
+    def open_api_billing(self):
+        # A fixed official URL; never open a URL supplied by remote error text.
+        url = self.current.get("codex", {}).get("data", {}).get("api", {}).get("billing_url")
+        if url == "https://platform.openai.com/settings/organization/billing/overview":
+            QDesktopServices.openUrl(QUrl(url))
 
     def create_tray(self):
         self.tray = None
@@ -555,9 +578,20 @@ class UsagePet(QWidget):
             self.summary_codex.setText("—")
             self.summary_reset.setText("—")
             self.codex_box.addWidget(caption(codex.get("error", "未连接")))
-            self.codex_box.addWidget(caption("先执行 codex login，并确保使用 ChatGPT 账户登录，而不是纯 API Key。"))
+            self.codex_box.addWidget(caption("可在终端执行 codex login status 检查登录状态。"))
             return
         result = codex["data"]
+        if result.get("mode") == "api":
+            title.setText("Codex / " + result["api"]["provider"])
+            self.summary_codex.setText("—")
+            self.summary_reset.setText("—")
+            self.codex_box.addWidget(QLabel("当前登录方式：API Key"))
+            self.codex_box.addWidget(caption(result["api"]["message"]))
+            if result["api"].get("billing_url"):
+                button = QPushButton("查看 OpenAI API 余额 ↗")
+                button.clicked.connect(self.open_api_billing)
+                self.codex_box.addWidget(button)
+            return
         account = " · ".join(filter(None, (result.get("email"), str(result["plan"]).upper() if result.get("plan") else None)))
         if account:
             self.codex_box.addWidget(caption(account))

@@ -50,5 +50,36 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(data['buckets'][0]['windows'][1]['remaining'],40)
         self.assertEqual(data['token_summary']['lifetimeTokens'],12345)
 
+class TestAPILogin(unittest.TestCase):
+    def run_server(self, source):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / 'codex'
+            fake.write_text(source)
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            with patch('providers.locate_codex', return_value=str(fake)):
+                return fetch_codex()
+
+    def test_api_key_does_not_call_plan_quota_or_usage(self):
+        source = SIMULATED_CODEX.replace(
+            "result={'account':{'type':'chatgpt','email':'example@test.invalid','planType':'pro'}}",
+            "result={'account':{'type':'apiKey'},'requiresOpenaiAuth':True}")
+        source = source.replace("    assert 'params' in q", "    assert method not in ('account/rateLimits/read','account/usage/read'), 'API mode must not read plan quotas'\n    assert 'params' in q")
+        result = self.run_server(source)
+        self.assertEqual(result['mode'], 'api')
+        self.assertEqual(result['api']['provider'], 'OpenAI')
+        self.assertIsNone(result['api']['balance'])
+        self.assertEqual(result['buckets'], [])
+        self.assertIsNone(result['resets'])
+
+    def test_active_external_provider_overrides_stored_chatgpt_account(self):
+        source = SIMULATED_CODEX.replace(
+            "    elif method == 'account/rateLimits/read':",
+            "    elif method == 'config/read':\n        result={'config':{'model_provider':'gateway','model_providers':{'gateway':{'base_url':'https://example.invalid/v1','requires_openai_auth':False}}}}\n    elif method == 'account/rateLimits/read':")
+        result = self.run_server(source)
+        self.assertEqual(result['mode'], 'api')
+        self.assertEqual(result['api']['host'], 'example.invalid')
+        self.assertIsNone(result['api']['billing_url'])
+
+
 if __name__ == '__main__':
     unittest.main()

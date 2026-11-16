@@ -271,7 +271,7 @@ def api_mode_info(config: dict) -> dict:
             "host": host,
             "balance": None,
             "status": "unavailable",
-            "message": "普通 API Key 无法通过公开接口读取剩余余额，请在 OpenAI 账单页查看。" if official else "此平台的余额接口尚未适配。",
+            "message": "请在 Chrome 登录官方余额页，通过扩展同步当前组织余额。" if official else "此平台的余额接口尚未适配。",
             "billing_url": "https://platform.openai.com/settings/organization/billing/overview" if official else None,
         },
     }

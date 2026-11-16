@@ -7,8 +7,8 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl
-from PySide6.QtGui import QIcon, QDesktopServices
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar,
@@ -20,6 +20,9 @@ from widgets import PetScene, WindowDrag
 
 from providers import refresh_all, save_deepseek_key, delete_deepseek_key
 import preferences
+
+if QApplication.instance() is None:
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
 APP_DIR = Path(__file__).resolve().parent
 COLOR = {
@@ -172,12 +175,19 @@ class UsageRow(QWidget):
 
 
 class UsagePet(QWidget):
+    browserBalanceReceived = Signal(dict)
+
     def __init__(self, app: QApplication):
         super().__init__()
         self.app = app
         self.prefs = preferences.load()
         self.expanded = False
         self.current = {}
+        self.billing_window = None
+        self.browser_bridge = None
+        self.browser_dialog = None
+        self.web_balance = {}
+        self.browserBalanceReceived.connect(self.apply_web_balance)
         self.notified = set()
         self.worker = None
         self.setWindowTitle("用量小猫 · AI Usage Pet")
@@ -212,6 +222,7 @@ class UsagePet(QWidget):
         self.provider_selector = QComboBox()
         self.provider_selector.addItem("Codex ▾", "codex")
         self.provider_selector.addItem("DeepSeek ▾", "deepseek")
+        self.provider_selector.addItem("OpenAI API ▾", "openai")
         self.provider_selector.setStyleSheet("QComboBox {background: transparent; border: none; border-radius: 0px; padding: 0px; min-height: 0px; font-size: 10px; color: #777184;} QComboBox::drop-down {width: 0px;}")
         self.provider_selector.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.provider_selector.setFixedHeight(18)
@@ -257,7 +268,7 @@ class UsagePet(QWidget):
         self.sync.hide()
         self.quick_refresh = QPushButton("刷新")
         self.quick_refresh.hide()
-        self.quick_refresh.clicked.connect(self.refresh)
+        self.quick_refresh.clicked.connect(self.manual_refresh)
         self.drag.attach(self.root)
         self.quota_windows = []
 
@@ -273,11 +284,12 @@ class UsagePet(QWidget):
         actionbar = QHBoxLayout()
         self.refresh_btn = QPushButton("↻ 立即刷新")
         self.refresh_btn.setObjectName("Primary")
-        self.refresh_btn.clicked.connect(self.refresh)
+        self.refresh_btn.clicked.connect(self.manual_refresh)
         actionbar.addWidget(self.refresh_btn)
         d.addLayout(actionbar)
         self.codex_box = card(d)
         self.ds_box = card(d)
+        self.api_box = card(d)
         self.settings_dialog = QDialog(self)
         self.settings_dialog.setWindowTitle("用量小猫 · 设置")
         self.settings_dialog.setFixedWidth(380)
@@ -354,10 +366,11 @@ class UsagePet(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet("QMenu {background: #faf9f6; border: 1px solid #e7e5ed; padding: 5px; border-radius: 8px;} QMenu::item {padding: 7px 16px;} QMenu::item:selected {background: #eeeaf8; border-radius: 5px;}")
         menu.addAction("收起详情" if self.expanded else "查看全部额度", self.toggle)
-        menu.addAction("刷新用量", self.refresh)
+        menu.addAction("刷新用量", self.manual_refresh)
         menu.addAction("设置", self.show_settings)
-        if self.provider_selector.currentData() == "codex" and self.current.get("codex", {}).get("data", {}).get("api", {}).get("billing_url"):
-            menu.addAction("查看 API 余额", self.open_api_billing)
+        if self.provider_selector.currentData() in ("codex", "openai"):
+            menu.addAction("连接 Chrome 余额", self.open_api_billing)
+            menu.addAction("内置网页登录（备用）", self.open_embedded_billing)
         menu.addSeparator()
         menu.addAction(self.polling_text()).setEnabled(False)
         menu.addSeparator()
@@ -380,6 +393,7 @@ class UsagePet(QWidget):
         self.provider_selector.setItemText(0, "Codex · API ▾" if api_mode else "Codex · " + plan_label + " ▾")
         self.codex_box.parentWidget().setVisible(provider == "codex")
         self.ds_box.parentWidget().setVisible(provider == "deepseek")
+        self.api_box.parentWidget().setVisible(provider == "openai")
         self.hero_value.setText("—")
         self.render_compact([])
         if provider == "codex":
@@ -387,8 +401,14 @@ class UsagePet(QWidget):
             if not codex.get("ok"):
                 self.balance_line.setText(codex.get("error", "正在读取 Codex 账户…"))
             elif api_mode:
-                self.hero_caption.setText("API 余额")
-                self.balance_line.setText(result["api"]["message"])
+                web_balance = self.current_web_balance()
+                if web_balance and result["api"].get("billing_url"):
+                    self.hero_value.setText(money(web_balance["balance"], "USD"))
+                    self.hero_caption.setText("组织余额")
+                    self.balance_line.setText("来源：OpenAI 网页当前组织；请确认该组织与 API Key 对应。")
+                else:
+                    self.hero_caption.setText("API 余额")
+                    self.balance_line.setText(result["api"]["message"])
             else:
                 buckets = result.get("buckets", [])
                 windows = []
@@ -410,6 +430,13 @@ class UsagePet(QWidget):
                 if not windows:
                     info = "服务未返回额度窗口 · " + info
                 self.balance_line.setText(info)
+        elif provider == "openai":
+            balance = self.current_web_balance()
+            self.hero_caption.setText("组织余额")
+            self.hero_value.setText(money(balance["balance"], "USD") if balance else "—")
+            self.hero_value.setStyleSheet("font-size: 21px; font-weight: 600; color: #67577f;")
+            self.balance_line.setText("OpenAI 网页当前组织余额；请确认组织与 API Key 对应。" if balance else "在 Chrome 登录余额页，通过扩展连接浮条。")
+            self.render_api_balance()
         else:
             self.hero_caption.setText("可用余额")
             self.hero_value.setText(self.summary_deepseek.text())
@@ -428,6 +455,13 @@ class UsagePet(QWidget):
         QTimer.singleShot(0, self.adjustSize)
 
     def polling_text(self):
+        if self.provider_selector.currentData() == "openai":
+            balance = self.current_web_balance()
+            if not balance:
+                return "网页余额：等待 Chrome 扩展读取"
+            minutes = self.browser_bridge.refresh_minutes if self.browser_bridge else self.prefs.get("refresh_minutes", 5)
+            next_time = datetime.fromtimestamp(balance["checked_at"] + minutes * 60)
+            return "网页预计下次读取：" + next_time.strftime("%H:%M")
         if not self.quick_refresh.isEnabled():
             return "账户数据：正在查询…"
         remaining = self.timer.remainingTime()
@@ -437,16 +471,23 @@ class UsagePet(QWidget):
         return "数据下次查询：" + next_time.strftime("%H:%M")
 
     def update_timing(self):
+        if self.web_balance and not self.current_web_balance():
+            self.web_balance = {}
+            self.render_codex(self.current.get("codex", {}))
+            self.render_selected()
+            return
         provider = self.provider_selector.currentData()
         codex = self.current.get("codex", {})
         ds = self.current.get("deepseek", {})
         details = self.balance_line.text()
         is_api = codex.get("data", {}).get("mode") == "api"
-        if provider == "codex" and codex.get("ok") and is_api:
+        if provider == "openai" or (provider == "codex" and codex.get("ok") and is_api):
             self.mini_note.removeEventFilter(self.drag)
             self.mini_note.setCursor(Qt.CursorShape.PointingHandCursor)
-            if codex["data"]["api"].get("billing_url"):
-                self.mini_note.setText('<a href="billing" style="color:#8b8594; text-decoration:none;">余额需官网查看 ↗</a>')
+            if provider == "openai" or codex["data"]["api"].get("billing_url"):
+                balance = self.current_web_balance()
+                note = "网页更新 " + datetime.fromtimestamp(balance["checked_at"]).strftime("%H:%M") + " ↗" if balance else "连接 Chrome 余额 ↗"
+                self.mini_note.setText('<a href="billing" style="color:#8b8594; text-decoration:none;">' + note + '</a>')
             else:
                 self.mini_note.setText("余额接口未适配")
         elif provider == "codex" and codex.get("ok") and self.quota_windows:
@@ -467,11 +508,59 @@ class UsagePet(QWidget):
         self.hero_value.setToolTip(tooltip)
         self.mini_note.setToolTip(tooltip)
 
+    def current_web_balance(self):
+        checked_at = self.web_balance.get("checked_at", 0)
+        age = datetime.now().timestamp() - checked_at
+        return self.web_balance if 0 <= age <= self.prefs.get("refresh_minutes", 5) * 60 + 90 else {}
+
+    def apply_web_balance(self, data):
+        self.web_balance = data
+        if self.browser_dialog is not None:
+            self.browser_dialog.status.setText("已收到网页余额：" + money(data["balance"], "USD") if data else "等待网页读取余额…")
+        self.render_codex(self.current.get("codex", {}))
+        self.render_selected()
+
     def open_api_billing(self):
-        # A fixed official URL; never open a URL supplied by remote error text.
-        url = self.current.get("codex", {}).get("data", {}).get("api", {}).get("billing_url")
-        if url == "https://platform.openai.com/settings/organization/billing/overview":
-            QDesktopServices.openUrl(QUrl(url))
+        if self.browser_dialog is None:
+            from browser_balance import BalanceBridge, create_browser_dialog
+            try:
+                self.browser_bridge = BalanceBridge(self.browserBalanceReceived.emit,
+                                                    self.prefs.get("refresh_minutes", 5))
+            except OSError:
+                QMessageBox.warning(self, "连接不可用", "无法启动本机余额接收器。请检查本机网络权限。")
+                return
+            self.app.aboutToQuit.connect(self.browser_bridge.close)
+            self.browser_dialog = create_browser_dialog(self, self.browser_bridge)
+        self.browser_dialog.show()
+        self.browser_dialog.raise_()
+        self.browser_dialog.activateWindow()
+
+    def render_api_balance(self):
+        self.clear_layout(self.api_box)
+        self.api_box.addWidget(QLabel("OpenAI API · 网页组织余额"))
+        balance = self.current_web_balance()
+        if balance:
+            self.api_box.addWidget(QLabel(money(balance["balance"], "USD")))
+            self.api_box.addWidget(caption("网页读取于 " + datetime.fromtimestamp(balance["checked_at"]).strftime("%m-%d %H:%M")))
+        else:
+            self.api_box.addWidget(caption("在 Chrome 登录官方余额页，选好对应组织，再连接扩展。"))
+        self.api_box.addWidget(caption("显示所选网页组织余额，不代表单个 Key 的独立预算。请保留余额标签页，以便定时刷新。"))
+        button = QPushButton("连接 Chrome 余额 ↗")
+        button.clicked.connect(self.open_api_billing)
+        self.api_box.addWidget(button)
+
+    def open_embedded_billing(self):
+        if self.billing_window is None:
+            try:
+                from web_balance import create_billing_window
+                self.billing_window = create_billing_window(self)
+                self.billing_window.balanceChanged.connect(self.apply_web_balance)
+            except (ImportError, RuntimeError):
+                QMessageBox.warning(self, "网页组件不可用", "当前环境无法启动内置网页窗口。可先在浏览器查看 OpenAI 账单页。")
+                return
+        self.billing_window.show()
+        self.billing_window.raise_()
+        self.billing_window.activateWindow()
 
     def create_tray(self):
         self.tray = None
@@ -484,7 +573,7 @@ class UsagePet(QWidget):
         settings = menu.addAction("设置")
         settings.triggered.connect(self.show_settings)
         refresh = menu.addAction("刷新用量")
-        refresh.triggered.connect(self.refresh)
+        refresh.triggered.connect(self.manual_refresh)
         menu.addSeparator()
         exit_action = menu.addAction("退出")
         exit_action.triggered.connect(self.app.quit)
@@ -526,9 +615,19 @@ class UsagePet(QWidget):
         self.adjustSize()
         QTimer.singleShot(0, self.adjustSize)
 
+    def manual_refresh(self):
+        if self.provider_selector.currentData() == "openai":
+            self.open_api_billing()
+            if self.browser_dialog is not None and self.current_web_balance():
+                self.browser_dialog.status.setText('立即读取请在 Chrome 扩展中点击“立即刷新”；定时读取会自动执行。')
+            return
+        self.refresh()
+
     def refresh(self):
         if self.worker and self.worker.isRunning():
             return
+        if self.billing_window and self.billing_window.connected and self.current.get("codex", {}).get("data", {}).get("mode") == "api":
+            self.billing_window.refresh_balance()
         self.sync.setText("正在更新…")
         self.scene.busy = True
         self.refresh_btn.setEnabled(False)
@@ -586,9 +685,14 @@ class UsagePet(QWidget):
             self.summary_codex.setText("—")
             self.summary_reset.setText("—")
             self.codex_box.addWidget(QLabel("当前登录方式：API Key"))
-            self.codex_box.addWidget(caption(result["api"]["message"]))
+            balance = self.current_web_balance() if result["api"].get("billing_url") else {}
+            if balance:
+                self.codex_box.addWidget(QLabel("网页组织余额：" + money(balance["balance"], "USD")))
+                self.codex_box.addWidget(caption("此余额来自你确认的网页组织，不代表单个 Key 的独立预算。"))
+            else:
+                self.codex_box.addWidget(caption(result["api"]["message"]))
             if result["api"].get("billing_url"):
-                button = QPushButton("查看 OpenAI API 余额 ↗")
+                button = QPushButton("连接 Chrome / 更新组织余额 ↗")
                 button.clicked.connect(self.open_api_billing)
                 self.codex_box.addWidget(button)
             return
@@ -684,6 +788,8 @@ class UsagePet(QWidget):
         v = self.interval.currentData()
         if isinstance(v, int):
             self.prefs["refresh_minutes"] = v
+            if self.browser_bridge is not None:
+                self.browser_bridge.refresh_minutes = v
             preferences.save(self.prefs)
             self.timer.start(v * 60000)
             self.update_timing()
@@ -719,6 +825,8 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     pet = UsagePet(app)
     pet.show()
+    if "--connect-billing" in sys.argv:
+        QTimer.singleShot(100, pet.open_api_billing)
     code = app.exec()
     if pet.worker and pet.worker.isRunning():
         # QThread must finish before its QObject is destroyed. Network calls

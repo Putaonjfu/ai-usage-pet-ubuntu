@@ -105,14 +105,71 @@ class UI(unittest.TestCase):
         self.assertEqual(self.pet.quota_windows, [])
         self.assertIsNone(self.pet.scene.remaining)
         self.assertEqual(self.pet.summary_reset.text(), '—')
-        self.assertIn('余额需官网查看', self.pet.mini_note.text())
+        self.assertIn('连接 Chrome 余额', self.pet.mini_note.text())
         self.assertEqual((self.pet.width(), self.pet.height()), (240, 88))
-        with patch('main.QDesktopServices.openUrl') as open_url:
-            self.pet.open_api_billing()
-            self.assertEqual(open_url.call_args.args[0].toString(), 'https://platform.openai.com/settings/organization/billing/overview')
+        with patch('web_balance.create_billing_window') as create_window:
+            self.pet.open_embedded_billing()
+            create_window.assert_called_once_with(self.pet)
+            self.pet.billing_window.show.assert_called_once()
         self.pet.updated(DATA)
         self.assertEqual(self.pet.hero_value.text(), '42%')
+
+    def test_openai_balance_is_separate_from_codex_chatgpt_subscription(self):
+        import time
+        self.pet.updated(DATA)
+        self.pet.apply_web_balance({'balance': '12.34', 'checked_at': int(time.time()), 'source': 'chrome_web'})
+        self.assertEqual(self.pet.hero_value.text(), '42%')
+        self.pet.provider_selector.setCurrentIndex(self.pet.provider_selector.findData('openai'))
+        self.assertEqual(self.pet.hero_value.text(), '$12.34')
+        self.assertEqual(self.pet.hero_caption.text(), '组织余额')
+        self.assertIsNone(self.pet.scene.remaining)
+        self.assertEqual((self.pet.width(), self.pet.height()), (240, 88))
+        self.assertTrue(self.pet.api_box.parentWidget().isHidden() is False)
+        self.pet.apply_web_balance({})
+        self.assertEqual(self.pet.hero_value.text(), '—')
+        self.pet.provider_selector.setCurrentIndex(0)
+        self.assertEqual(self.pet.hero_value.text(), '42%')
         self.assertEqual(self.pet.scene.remaining, 42)
+
+    def test_loopback_balance_reaches_qt_and_connection_dialog(self):
+        import http.client
+        import json
+        self.pet.updated(DATA)
+        self.pet.provider_selector.setCurrentIndex(self.pet.provider_selector.findData('openai'))
+        self.pet.open_api_billing()
+        bridge = self.pet.browser_bridge
+        try:
+            connection = http.client.HTTPConnection('127.0.0.1', bridge.port, timeout=3)
+            connection.request('POST', '/balance', json.dumps({'balance': '12.34'}),
+                               {'Authorization': 'Bearer ' + bridge.token, 'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+            self.assertEqual(response.status, 200)
+            self.app.processEvents()
+            self.assertEqual(self.pet.hero_value.text(), '$12.34')
+            self.assertIn('$12.34', self.pet.browser_dialog.status.text())
+        finally:
+            bridge.close()
+            self.app.aboutToQuit.disconnect(bridge.close)
+
+    def test_web_balance_is_organization_money_and_stale_data_is_hidden(self):
+        from providers import api_mode_info
+        import time
+        data = deepcopy(DATA)
+        data['codex']['data'] = api_mode_info({})
+        self.pet.updated(data)
+        self.pet.apply_web_balance({'balance': '12.34', 'currency': 'USD', 'checked_at': int(time.time())})
+        self.assertEqual(self.pet.hero_value.text(), '$12.34')
+        self.assertEqual(self.pet.hero_caption.text(), '组织余额')
+        self.assertIsNone(self.pet.scene.remaining)
+        self.assertIn('网页更新', self.pet.mini_note.text())
+        self.pet.apply_web_balance({})
+        self.assertEqual(self.pet.hero_value.text(), '—')
+        self.pet.apply_web_balance({'balance': '12.34', 'checked_at': int(time.time()) - 3600})
+        self.assertEqual(self.pet.hero_value.text(), '—')
+        self.pet.updated(DATA)
+        self.assertEqual(self.pet.hero_value.text(), '42%')
 
     def test_expand_collapse_and_settings(self):
         small_height = self.pet.height()

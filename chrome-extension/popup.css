@@ -1,0 +1,7 @@
+body {width:310px; padding:16px; margin:0; background:#faf9f6; color:#292b3b; font:13px/1.6 system-ui,sans-serif;}
+h1 {font-size:19px; margin:0 0 8px;} p {margin:8px 0;} small {color:#777184;}
+input[type=password] {box-sizing:border-box; width:100%; padding:9px; border:1px solid #dad5e7; border-radius:8px; background:white;}
+.confirm {display:flex; gap:6px; margin:12px 0; align-items:flex-start;} .confirm input {margin-top:5px;}
+button {border:0; border-radius:8px; padding:9px; background:#e8e3f2; color:#51446e; cursor:pointer; width:100%;}
+#connect {background:#67577f; color:white;} button:disabled {opacity:.5; cursor:wait;}
+.row {display:flex; gap:8px; margin-top:8px;} #status {word-break:break-word;}

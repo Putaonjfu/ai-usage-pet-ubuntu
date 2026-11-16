@@ -13,3 +13,6 @@ backups/
 previews/
 settings.json
 .DS_Store
+
+web-profile/
+QtWebEngine/

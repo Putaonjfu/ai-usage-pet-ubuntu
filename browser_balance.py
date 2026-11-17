@@ -62,6 +62,7 @@ class BalanceBridge:
         self.last_balance_at = 0
         self.last_state = 'waiting'
         self.client_version = None
+        self.set_monitoring_mode('unknown')
         bridge = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -109,7 +110,7 @@ class BalanceBridge:
                 else:
                     self.reply(200, {'ok': True, 'last_contact_at': bridge.last_contact_at,
                         'last_balance_at': bridge.last_balance_at, 'state': bridge.last_state,
-                        'client_version': bridge.client_version})
+                        'client_version': bridge.client_version, **bridge.monitoring_policy})
 
             def do_POST(self):
                 if self.path != '/balance' or not self.valid_host() or not self.allowed_origin():
@@ -123,9 +124,25 @@ class BalanceBridge:
                     if not 0 < length <= 256 or self.headers.get_content_type() != 'application/json':
                         raise ValueError()
                     data = json.loads(self.rfile.read(length))
+                    if not isinstance(data, dict):
+                        raise ValueError()
                     version = data.pop('client_version', None) if isinstance(data, dict) else None
                     if version is not None and (not isinstance(version, str) or not re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){2,3}', version)):
                         raise ValueError()
+                    # Old clients create a window after their first successful
+                    # POST. Reject them even in API mode, before that can happen.
+                    bridge.client_version = version
+                    bridge.last_contact_at = int(time.time())
+                    if version is None or tuple(map(int, version.split('.'))) < (1, 4, 0):
+                        if bridge.monitoring_policy['monitoring_allowed']:
+                            bridge.last_state = 'update_required'
+                            on_balance({'state': 'update_required'})
+                        self.reply(426, {'ok': False, 'message': '请重新加载 1.4.0 扩展；旧版自动开窗已停用'})
+                        return
+                    policy = bridge.monitoring_policy
+                    if not policy['monitoring_allowed']:
+                        self.reply(409, {'ok': False, **policy})
+                        return
                     if isinstance(data, dict) and set(data) == {'state'}:
                         if not isinstance(data['state'], str) or data['state'] not in STATES:
                             raise ValueError()
@@ -177,6 +194,14 @@ class BalanceBridge:
     def pairing_code(self):
         return f'{self.port}:{self.token}'
 
+    def set_monitoring_mode(self, mode):
+        # Replaced atomically; HTTP workers never access Qt objects.
+        self.monitoring_policy = {'monitoring_allowed': mode == 'api',
+                                 'monitoring_mode': mode,
+                                 'minimum_client_version': '1.4.0'}
+        if mode != 'api':
+            self.last_state = 'paused'
+
     def close(self):
         if self.closed:
             return
@@ -200,7 +225,7 @@ def create_browser_dialog(parent, bridge):
     for text in [
         '1. 在系统 Chrome 打开 chrome://extensions，开启“开发者模式”，加载下面的扩展文件夹。',
         '2. 在 Chrome 登录 OpenAI 余额页，选择 API Key 所属组织，点击扩展图标。',
-        '3. 首次粘贴连接码并确认组织，之后自动重连。扩展会创建独立的最小化余额窗口。',
+        '3. 首次粘贴连接码并确认组织，之后自动重连。只刷新已打开的余额页，不会自动开窗。',
     ]:
         label = QLabel(text)
         label.setWordWrap(True)
@@ -218,7 +243,7 @@ def create_browser_dialog(parent, bridge):
     website = QPushButton('在默认浏览器打开 OpenAI 余额页')
     website.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(BILLING_URL)))
     layout.addWidget(website)
-    note = QLabel('独立余额窗口请保持最小化，普通 Chrome 窗口可以关闭。完全退出 Chrome 会停止更新；网页登录失效时，在扩展中点“打开独立余额窗口”。')
+    note = QLabel('Codex 使用 ChatGPT 账号时暂停网页查询。使用官方 API 时，每分钟刷新已打开的余额页；关闭页面后暂停，不会重新打开浏览器。')
     note.setWordWrap(True)
     layout.addWidget(note)
     dialog.status = QLabel('等待 Chrome 扩展连接…')

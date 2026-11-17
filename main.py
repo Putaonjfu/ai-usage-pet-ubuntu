@@ -535,6 +535,10 @@ class UsagePet(QWidget):
         return self.web_balance if 0 <= age <= lifetime else {}
 
     def apply_web_balance(self, data):
+        # A receipt can already be queued when the account switches. Do not
+        # accept it after the latest identity check has paused web monitoring.
+        if self.browser_monitoring_mode() != 'api':
+            return
         if 'state' in data:
             self.web_state = data['state']
             if self.web_state != 'refreshing':
@@ -551,7 +555,9 @@ class UsagePet(QWidget):
     def web_state_text(self):
         return {'waiting': '等待扩展连接', 'connected': '网页余额已更新',
                 'refreshing': '正在更新余额', 'expired': '余额更新中断',
-                'login_required': '网页需要登录', 'page_missing': '正在恢复余额页',
+                'login_required': '网页需要登录', 'page_missing': '余额页已关闭 · 已暂停',
+                'paused': '网页查询已暂停',
+                'update_required': '扩展需重载至 1.4.0',
                 'read_failed': '网页读取失败', 'network_error': '网页连接超时',
                 'multiple_pages': '请选择余额页', 'disconnected': '已取消配对'}.get(self.web_state, '等待网页更新')
 
@@ -560,7 +566,26 @@ class UsagePet(QWidget):
             from browser_balance import BalanceBridge
             self.browser_bridge = BalanceBridge(self.browserBalanceReceived.emit, 1,
                 state_path=preferences.CONFIG.parent / 'browser-pairing.json')
+            self.update_browser_monitoring()
             self.app.aboutToQuit.connect(self.browser_bridge.close)
+
+    def browser_monitoring_mode(self):
+        codex = self.current.get('codex', {})
+        data = codex.get('data', {}) if codex.get('ok') else {}
+        mode = data.get('mode', 'unknown')
+        if mode == 'api' and not data.get('api', {}).get('billing_url'):
+            mode = 'unsupported_api'
+        return mode
+
+    def update_browser_monitoring(self):
+        mode = self.browser_monitoring_mode()
+        if self.browser_bridge is not None:
+            self.browser_bridge.set_monitoring_mode(mode)
+        if mode != 'api':
+            self.web_balance = {}
+            self.web_state = 'paused'
+        elif self.web_state == 'paused':
+            self.web_state = 'waiting'
 
     def restore_browser_bridge(self):
         if (preferences.CONFIG.parent / 'browser-pairing.json').exists():
@@ -695,6 +720,7 @@ class UsagePet(QWidget):
     def updated(self, data):
         self.scene.busy = False
         self.current = data
+        self.update_browser_monitoring()
         self.refresh_btn.setEnabled(True)
         self.quick_refresh.setEnabled(True)
         self.sync.setText("更新于 " + datetime.fromtimestamp(data["checked_at"]).strftime("%H:%M"))

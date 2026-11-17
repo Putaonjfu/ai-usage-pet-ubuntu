@@ -32,6 +32,7 @@ async function sendPayload(connection, payload) {
     });
   } catch { throw new Error('等待浮条启动，将自动重连'); }
   if (response.status === 401) throw new Error('本机配对已更换，请重新复制连接码');
+  if (response.status === 409) throw failure('paused', 'API 网页查询已暂停');
   if (!response.ok) throw new Error('本次余额已过期或读取失败，等待自动更新');
   return response.json();
 }
@@ -45,59 +46,36 @@ async function ensureAlarm() {
   if (!(await chrome.alarms.get(ALARM))) await chrome.alarms.create(ALARM, {periodInMinutes: 1});
 }
 
-async function createMonitorTab(url = BILLING) {
-  // Always use an independent window, even while ordinary browser windows are
-  // open. Closing an ordinary window must not close the monitor's document.
-  const window = await chrome.windows.create({url, state: 'minimized', focused: false});
-  const tab = window?.tabs?.[0] || (window && (await chrome.tabs.query({windowId: window.id}))[0]);
-  if (!tab) throw failure('page_missing', '后台余额窗口暂不可用，将自动重试');
-  return tab;
+async function checkPolicy(connection) {
+  let response;
+  try {
+    response = await fetch(`http://127.0.0.1:${connection.port}/status`, {
+      headers: {Authorization: `Bearer ${connection.token}`}, credentials: 'omit',
+      cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(5000)
+    });
+  } catch { throw failure('paused', '等待浮条启动；浏览器不会自动打开'); }
+  if (!response.ok) throw failure('paused', '本机连接不可用，请检查浮条');
+  const policy = await response.json();
+  if (policy.monitoring_allowed !== true) {
+    throw failure('paused', policy.monitoring_mode === 'chatgpt'
+      ? 'Codex 使用账号登录，API 网页查询已暂停'
+      : '当前登录方式无需查询 OpenAI API 网页余额，已暂停');
+  }
 }
 
 async function boundTab() {
   const {binding} = await chrome.storage.session.get('binding');
-  let previous;
   if (binding) {
     try {
-      previous = await chrome.tabs.get(binding.tabId);
-      if (binding.dedicated && isBilling(previous.url)) return previous;
+      const previous = await chrome.tabs.get(binding.tabId);
+      if (isBilling(previous.url)) return previous;
     } catch {}
   }
   const tabs = (await chrome.tabs.query({url: 'https://platform.openai.com/*'})).filter(tab => isBilling(tab.url));
-  let source = isBilling(previous?.url) ? previous : undefined;
-  // After a browser restart, reuse a single minimized billing window instead
-  // of creating another one. No user tabs are moved or closed.
-  if (!source) {
-    const monitors = [];
-    for (const tab of tabs) {
-      const window = await chrome.windows.get(tab.windowId, {populate: true});
-      if (window.state === 'minimized' && window.tabs?.length === 1) monitors.push(tab);
-    }
-    if (monitors.length === 1) {
-      const tab = monitors[0];
-      await chrome.storage.session.set({binding: {tabId: tab.id, windowId: tab.windowId, dedicated: true}});
-      return tab;
-    }
-    if (tabs.length > 1) throw failure('multiple_pages', '有多个余额页，请选中要同步的标签，在扩展中点击“使用当前页”');
-    source = tabs[0];
-  }
-  // Prefer an already-open billing page after login opens a new tab. A bound
-  // tab that navigated to an unrelated site must not block monitoring forever.
-  if (!source && previous && binding.dedicated) {
-    try {
-      const url = new URL(previous.url);
-      if (url.protocol === 'https:' && ['auth.openai.com', 'auth0.openai.com', 'accounts.google.com'].includes(url.hostname))
-        return previous;
-    } catch {}
-  }
-  // An existing dedicated monitor that finishes login in another tab can be
-  // navigated back safely; it is owned by this extension, not the user's tab.
-  if (source && previous && binding.dedicated) {
-    const tab = await chrome.tabs.update(previous.id, {url: source.url});
-    return tab;
-  }
-  const tab = await createMonitorTab(source?.url || BILLING);
-  await chrome.storage.session.set({binding: {tabId: tab.id, windowId: tab.windowId, dedicated: true}});
+  if (tabs.length > 1) throw failure('multiple_pages', '有多个余额页，请选中要同步的标签，在扩展中点击“使用当前页”');
+  if (!tabs.length) throw failure('page_missing', '余额页未打开，已暂停；不会自动开窗');
+  const tab = tabs[0];
+  await chrome.storage.session.set({binding: {tabId: tab.id}});
   return tab;
 }
 
@@ -123,7 +101,7 @@ async function readTab(tab, reload) {
     await waitForTab(tab.id, false);
     tab = await chrome.tabs.get(tab.id);
   }
-  if (!isBilling(tab.url)) throw failure('login_required', '请在后台余额标签页完成登录；返回余额页后自动恢复');
+  if (!isBilling(tab.url)) throw failure('login_required', '请在余额页完成登录；不会自动打开登录窗口');
   if (reload) await waitForTab(tab.id, true);
   if (!isBilling((await chrome.tabs.get(tab.id)).url))
     throw failure('login_required', '网页已跳转，请完成登录并返回余额页；无需重新配对');
@@ -147,6 +125,7 @@ async function sync(reload = false) {
     ({connection} = await chrome.storage.local.get('connection'));
     if (!connection) return {ok: false, message: '请先配对一次，之后自动连接'};
     await ensureAlarm();
+    await checkPolicy(connection);
     await sendState(connection, 'refreshing');
     const tab = await boundTab();
     const balance = await readTab(tab, reload);
@@ -154,7 +133,7 @@ async function sync(reload = false) {
     await sendBalance(connection, balance);
     return await syncedStatus(balance);
   } catch (error) {
-    if (connection) {
+    if (connection && error.state !== 'paused') {
       try { await sendState(connection, error.state || 'read_failed'); } catch {}
     }
     const message = error.message || '等待自动重试';
@@ -176,6 +155,7 @@ async function watchBalance(message, sender) {
       || !Number.isInteger(sampledAt) || Date.now() / 1000 - sampledAt > 145
       || sampledAt > Date.now() / 1000) return {ok: false};
   try {
+    await checkPolicy(connection);
     await sendBalance(connection, balance, sampledAt);
     if (balance !== null) return await syncedStatus(balance);
     await sendState(connection, 'read_failed');
@@ -206,12 +186,17 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       return sync();
     }
     if (message.type === 'sync') return sync(true);
-    if (message.type === 'open_monitor') {
-      if (!(await chrome.storage.local.get('connection')).connection) return {ok: false, message: '请先配对一次'};
-      const tab = await boundTab();
-      await chrome.windows.update(tab.windowId, {state: 'normal', focused: true});
-      await chrome.tabs.update(tab.id, {active: true});
-      return {ok: true, message: '已打开独立余额窗口；完成登录后可最小化，让它继续查询'};
+    // This is the only action allowed to open/focus a browser page, and it
+    // runs only after an explicit click in the extension popup.
+    if (message.type === 'open_billing') {
+      const tabs = (await chrome.tabs.query({url: 'https://platform.openai.com/*'})).filter(tab => isBilling(tab.url));
+      if (tabs.length === 1) {
+        await chrome.windows.update(tabs[0].windowId, {focused: true});
+        await chrome.tabs.update(tabs[0].id, {active: true});
+      } else {
+        await chrome.tabs.create({url: BILLING, active: true});
+      }
+      return {ok: true, message: '已打开官方余额页'};
     }
     if (message.type === 'disconnect') {
       const {connection} = await chrome.storage.local.get('connection');
@@ -235,7 +220,7 @@ chrome.tabs.onRemoved.addListener(async tabId => {
   const {connection} = await chrome.storage.local.get('connection');
   if (connection) { try { await sendState(connection, 'page_missing'); } catch {} }
   await chrome.storage.session.remove('binding');
-  await chrome.storage.session.set({status: '余额页已关闭，将在下次查询自动恢复后台标签页'});
+  await chrome.storage.session.set({status: '余额页已关闭，已暂停；不会自动重新打开'});
 });
 chrome.tabs.onUpdated.addListener(async (tabId, change) => {
   await ready;

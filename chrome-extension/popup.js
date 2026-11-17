@@ -1,6 +1,6 @@
 const status = document.getElementById('status');
 chrome.storage.session.get('status').then(data => { status.textContent = data.status || '尚未连接'; });
-for (const type of ['connect', 'sync', 'disconnect', 'use_current', 'open_monitor']) {
+for (const type of ['connect', 'sync', 'disconnect', 'use_current', 'open_billing']) {
   document.getElementById(type).addEventListener('click', async () => {
     const buttons = document.querySelectorAll('button');
     buttons.forEach(button => { button.disabled = true; });

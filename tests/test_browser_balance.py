@@ -15,13 +15,14 @@ class BrowserBridge(unittest.TestCase):
     def setUp(self):
         self.received = []
         self.bridge = BalanceBridge(self.received.append, 3)
+        self.bridge.set_monitoring_mode('api')
 
     def tearDown(self):
         self.bridge.close()
 
     def post(self, value, **overrides):
         connection = http.client.HTTPConnection('127.0.0.1', self.bridge.port, timeout=3)
-        body = json.dumps(value)
+        body = json.dumps({'client_version': '1.4.0', **value} if isinstance(value, dict) else value)
         headers = {'Authorization': 'Bearer ' + self.bridge.token, 'Content-Type': 'application/json',
                    'Origin': 'chrome-extension://' + 'a' * 32}
         headers.update(overrides)
@@ -89,6 +90,24 @@ class BrowserBridge(unittest.TestCase):
         self.assertEqual(self.post({'state': 'arbitrary page text'})[0], 400)
         self.assertEqual(self.post({'state': 'refreshing', 'cookies': 'no'})[0], 400)
 
+    def test_legacy_client_cannot_reach_window_creation_even_in_api_mode(self):
+        for version in (None, '1.0.0', '1.3.0'):
+            self.assertEqual(self.post({'state': 'refreshing', 'client_version': version})[0], 426)
+        self.assertTrue(all(item == {'state': 'update_required'} for item in self.received))
+        self.assertEqual(self.bridge.last_balance_at, 0)
+
+    def test_account_unknown_and_other_providers_pause_without_losing_pairing(self):
+        code = self.bridge.pairing_code
+        for mode in ('chatgpt', 'unknown', 'unsupported_api'):
+            self.bridge.set_monitoring_mode(mode)
+            self.assertFalse(self.bridge.monitoring_policy['monitoring_allowed'])
+            self.assertEqual(self.post({'state': 'refreshing'})[0], 409)
+            self.assertEqual(self.post({'balance': '12.34'})[0], 409)
+        self.assertEqual(self.received, [])
+        self.assertEqual(self.bridge.pairing_code, code)
+        self.bridge.set_monitoring_mode('api')
+        self.assertEqual(self.post({'balance': '12.34'})[0], 200)
+
     def test_diagnostics_prove_receipts_without_exposing_balance_or_pairing(self):
         def get_status(authorization):
             connection = http.client.HTTPConnection('127.0.0.1', self.bridge.port, timeout=3)
@@ -98,15 +117,15 @@ class BrowserBridge(unittest.TestCase):
             connection.close()
             return result
         self.assertEqual(get_status('Bearer wrong')[0], 401)
-        self.assertEqual(self.post({'balance': '12.34', 'client_version': '1.3.0'})[0], 200)
+        self.assertEqual(self.post({'balance': '12.34', 'client_version': '1.4.0'})[0], 200)
         status, diagnostic = get_status('Bearer ' + self.bridge.token)
         self.assertEqual(status, 200)
-        self.assertEqual(diagnostic['client_version'], '1.3.0')
+        self.assertEqual(diagnostic['client_version'], '1.4.0')
         self.assertEqual(diagnostic['state'], 'connected')
         self.assertGreater(diagnostic['last_balance_at'], 0)
         self.assertNotIn('balance', diagnostic)
         self.assertNotIn(self.bridge.token, json.dumps(diagnostic))
-        self.assertEqual(self.post({'state': 'refreshing', 'client_version': '1.3.0'})[0], 200)
+        self.assertEqual(self.post({'state': 'refreshing', 'client_version': '1.4.0'})[0], 200)
         self.assertEqual(self.post({'balance': '12.34', 'client_version': 'not a version'})[0], 400)
 
 

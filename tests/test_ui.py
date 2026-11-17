@@ -16,7 +16,7 @@ from main import UsagePet
 from widgets import WindowDrag
 
 DATA = {'checked_at': 1800000000, 'codex': {'ok': True, 'data': {
-    'email': 'demo@example.com', 'plan': 'plus', 'buckets': [
+    'mode': 'chatgpt', 'email': 'demo@example.com', 'plan': 'plus', 'buckets': [
         {'id': 'codex', 'windows': [
             {'remaining': 76, 'duration_mins': 300, 'resets_at': 1800003600},
             {'remaining': 42, 'duration_mins': 10080, 'resets_at': 1800400000}]}],
@@ -118,33 +118,43 @@ class UI(unittest.TestCase):
         self.pet.updated(DATA)
         self.assertEqual(self.pet.hero_value.text(), '42%')
 
-    def test_openai_balance_is_separate_from_codex_chatgpt_subscription(self):
+    def test_account_login_pauses_web_monitoring_and_ignores_queued_receipts(self):
+        from providers import api_mode_info
         import time
-        self.pet.updated(DATA)
-        self.pet.apply_web_balance({'balance': '12.34', 'checked_at': int(time.time()), 'source': 'chrome_web'})
-        self.assertEqual(self.pet.hero_value.text(), '42%')
+        data = deepcopy(DATA)
+        data['codex']['data'] = api_mode_info({})
+        self.pet.updated(data)
+        self.pet.browser_bridge = Mock()
+        sample = {'balance': '12.34', 'checked_at': int(time.time()), 'source': 'chrome_web'}
+        self.pet.apply_web_balance(sample)
         self.pet.provider_selector.setCurrentIndex(self.pet.provider_selector.findData('openai'))
         self.assertEqual(self.pet.hero_value.text(), '$12.34')
-        self.assertEqual(self.pet.hero_caption.text(), '组织余额')
-        self.assertIsNone(self.pet.scene.remaining)
-        self.assertEqual((self.pet.width(), self.pet.height()), (240, 88))
-        self.assertTrue(self.pet.api_box.parentWidget().isHidden() is False)
-        self.pet.apply_web_balance({})
+        self.pet.updated(DATA)
+        self.pet.browser_bridge.set_monitoring_mode.assert_called_with('chatgpt')
         self.assertEqual(self.pet.hero_value.text(), '—')
+        self.assertEqual(self.pet.web_state, 'paused')
+        self.pet.apply_web_balance(sample)
+        self.assertEqual(self.pet.web_balance, {})
         self.pet.provider_selector.setCurrentIndex(0)
         self.assertEqual(self.pet.hero_value.text(), '42%')
-        self.assertEqual(self.pet.scene.remaining, 42)
+        self.pet.updated(data)
+        self.pet.browser_bridge.set_monitoring_mode.assert_called_with('api')
+        self.pet.apply_web_balance(sample)
+        self.assertEqual(self.pet.hero_value.text(), '$12.34')
 
     def test_loopback_balance_reaches_qt_and_connection_dialog(self):
         import http.client
         import json
-        self.pet.updated(DATA)
+        from providers import api_mode_info
+        data = deepcopy(DATA)
+        data['codex']['data'] = api_mode_info({})
+        self.pet.updated(data)
         self.pet.provider_selector.setCurrentIndex(self.pet.provider_selector.findData('openai'))
         self.pet.open_api_billing()
         bridge = self.pet.browser_bridge
         try:
             connection = http.client.HTTPConnection('127.0.0.1', bridge.port, timeout=3)
-            connection.request('POST', '/balance', json.dumps({'balance': '12.34'}),
+            connection.request('POST', '/balance', json.dumps({'balance': '12.34', 'client_version': '1.4.0'}),
                                {'Authorization': 'Bearer ' + bridge.token, 'Content-Type': 'application/json'})
             response = connection.getresponse()
             response.read()
@@ -169,13 +179,17 @@ class UI(unittest.TestCase):
             self.assertIsNotNone(restored)
             self.assertEqual(restored.pairing_code, code)
             self.assertIsNone(self.pet.browser_dialog)
+            self.assertFalse(restored.monitoring_policy['monitoring_allowed'])
         finally:
             restored.close()
             self.app.aboutToQuit.disconnect(restored.close)
 
     def test_refresh_preserves_fresh_value_but_expiry_and_login_failure_explain_blank(self):
         import time
-        self.pet.updated(DATA)
+        from providers import api_mode_info
+        data = deepcopy(DATA)
+        data['codex']['data'] = api_mode_info({})
+        self.pet.updated(data)
         self.pet.provider_selector.setCurrentIndex(self.pet.provider_selector.findData('openai'))
         checked = int(time.time())
         self.pet.apply_web_balance({'balance': '12.34', 'checked_at': checked, 'source': 'chrome_web'})
